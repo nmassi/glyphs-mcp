@@ -152,6 +152,12 @@ The GlyphsApp plugin runs an HTTP server on `127.0.0.1:7745` inside GlyphsApp. A
 
 The MCP server is a thin translation layer — it receives MCP tool calls via stdio and forwards them as HTTP requests to the plugin.
 
+## Roadmap
+
+- **Kerning analysis** — Multi-master kerning consistency checks, inspired by [Kern On](https://kern-on.com/manual/)
+- **Auto-update** — Check for updates directly from the GlyphsMCP menu
+- **Analytics** — Optional usage telemetry to guide development priorities
+
 ## License
 
 MIT — Nicolas Massi
