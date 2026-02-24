@@ -20,9 +20,11 @@ MCP Client  ←(stdio/MCP)→  MCP Server  ←(HTTP/localhost)→  GlyphsApp Plu
 
 ### 1. Install the GlyphsApp plugin
 
-Download **GlyphsMCP.glyphsPlugin.zip** from the [latest release](https://github.com/nmassi/glyphs-mcp/releases/latest), unzip, and double-click to install.
+**From Plugin Manager (recommended):** Open GlyphsApp, go to _Window > Plugin Manager_, search for **MCP**, and click Install.
 
-Restart GlyphsApp. You should see a **GlyphsMCP** menu in the menu bar.
+**Manual install:** Download **GlyphsMCP.glyphsPlugin.zip** from the [latest release](https://github.com/nmassi/glyphs-mcp/releases/latest), unzip, and double-click to install.
+
+Restart GlyphsApp. You should see an **MCP** menu in the menu bar.
 
 ### 2. Connect your MCP client
 
@@ -47,6 +49,10 @@ claude mcp add glyphs-mcp -- uvx glyphs-mcp
 
 That's it.
 
+<p align="center">
+  <img src="assets/glyphs-mcp 01.png" alt="GlyphsMCP" width="600">
+</p>
+
 ### 3. Use it
 
 Open a font in GlyphsApp, then ask your AI assistant:
@@ -60,6 +66,10 @@ Open a font in GlyphsApp, then ask your AI assistant:
 > "Make the R 20% wider and harmonize the curves"
 
 ## Tools
+
+<p align="center">
+  <img src="assets/glyphs-mcp 02.png" alt="GlyphsMCP" width="600">
+</p>
 
 ### Read
 
@@ -133,9 +143,11 @@ All tools accept an optional `master_id` parameter. When omitted, read/write too
 
 ## Menu
 
-The plugin adds a **GlyphsMCP** menu to the menu bar:
+The plugin adds an **MCP** menu to the menu bar:
 
 - **Start/Stop Server** — toggle the HTTP server
+- **Connect** — copy ready-to-paste MCP config for Claude Code or VS Code (and forks)
+- **Documentation** — open this page in your browser
 - **Allow Execute Endpoint** — enable `execute_in_glyphs` (off by default for security)
 
 ## Preferences
@@ -145,6 +157,10 @@ The plugin adds a **GlyphsMCP** menu to the menu bar:
 | `com.glyphsmcp.port`         | `7745`  | HTTP server port                 |
 | `com.glyphsmcp.autostart`    | `true`  | Start server on GlyphsApp launch |
 | `com.glyphsmcp.allowExecute` | `false` | Enable the execute endpoint      |
+
+<p align="center">
+  <img src="assets/glyphs-mcp 03.png" alt="GlyphsMCP" width="600">
+</p>
 
 ## How it works
 

@@ -12,17 +12,35 @@ See ARCHITECTURE.md §3 for the full design.
 
 from GlyphsApp import *
 from GlyphsApp.plugins import *
-from AppKit import NSApp, NSMenu, NSMenuItem
+from AppKit import NSApp, NSMenu, NSMenuItem, NSPasteboard, NSWorkspace
+from Foundation import NSURL
+import os
+import json
 
 # Sibling imports from Resources/
 from bridge import MainThreadBridge
 from server import MCPHTTPServer
 
-PLUGIN_VERSION = "0.1.0"
 DEFAULT_PORT = 7745
 PREF_PORT = "com.glyphsmcp.port"
 PREF_AUTOSTART = "com.glyphsmcp.autostart"
 PREF_ALLOW_EXECUTE = "com.glyphsmcp.allowExecute"
+
+DOCS_URL = "https://github.com/nmassi/glyphs-mcp"
+
+
+def _discover_repo_path():
+	"""Read the repo path from .repo_path breadcrumb written by install_plugin.sh."""
+	resources_dir = os.path.dirname(__file__)
+	breadcrumb = os.path.join(resources_dir, ".repo_path")
+	try:
+		with open(breadcrumb, "r") as f:
+			path = f.read().strip()
+			if path and os.path.isdir(path):
+				return path
+	except (OSError, IOError):
+		pass
+	return None
 
 
 class GlyphsMCP(GeneralPlugin):
@@ -45,7 +63,10 @@ class GlyphsMCP(GeneralPlugin):
 		self.bridge = None
 		self.http_server = None
 
-		# Build submenu
+		# Cache repo path for config generation
+		self._repo_path = _discover_repo_path()
+
+		# Build menu items
 		self._server_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
 			"Start Server", self.toggleServer_, ""
 		)
@@ -57,13 +78,44 @@ class GlyphsMCP(GeneralPlugin):
 		self._execute_item.setTarget_(self)
 		self._execute_item.setState_(1 if Glyphs.defaults[PREF_ALLOW_EXECUTE] else 0)
 
-		submenu = NSMenu.alloc().initWithTitle_("GlyphsMCP")
+		# Connect submenu
+		self._connect_submenu = NSMenu.alloc().initWithTitle_("Connect")
+
+		self._copy_claude_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+			"Copy Config for Claude Code", self.copyClaudeConfig_, ""
+		)
+		self._copy_claude_item.setTarget_(self)
+		self._connect_submenu.addItem_(self._copy_claude_item)
+
+		self._copy_vscode_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+			"Copy Config for Visual Studio Code (Or any fork)", self.copyVSCodeConfig_, ""
+		)
+		self._copy_vscode_item.setTarget_(self)
+		self._connect_submenu.addItem_(self._copy_vscode_item)
+
+		self._connect_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+			"Connect", None, ""
+		)
+		self._connect_parent.setSubmenu_(self._connect_submenu)
+
+		# Documentation item
+		self._docs_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+			"Documentation", self.openDocumentation_, ""
+		)
+		self._docs_item.setTarget_(self)
+
+		# Assemble main menu
+		submenu = NSMenu.alloc().initWithTitle_("MCP")
 		submenu.addItem_(self._server_item)
+		submenu.addItem_(NSMenuItem.separatorItem())
+		submenu.addItem_(self._connect_parent)
+		submenu.addItem_(NSMenuItem.separatorItem())
+		submenu.addItem_(self._docs_item)
 		submenu.addItem_(NSMenuItem.separatorItem())
 		submenu.addItem_(self._execute_item)
 
 		parentItem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-			"GlyphsMCP", None, ""
+			"MCP", None, ""
 		)
 		parentItem.setSubmenu_(submenu)
 		self._menu_item = parentItem
@@ -122,6 +174,63 @@ class GlyphsMCP(GeneralPlugin):
 		self._execute_item.setState_(1 if new_val else 0)
 		state = "enabled" if new_val else "disabled"
 		print(f"[GlyphsMCP] Execute endpoint {state}")
+
+	def copyClaudeConfig_(self, sender):
+		"""Copy Claude Code MCP config JSON to clipboard."""
+		self._copyConfigToClipboard("claude")
+
+	def copyVSCodeConfig_(self, sender):
+		"""Copy VS Code MCP config JSON to clipboard."""
+		self._copyConfigToClipboard("vscode")
+
+	def openDocumentation_(self, sender):
+		"""Open the GitHub documentation in the default browser."""
+		url = NSURL.URLWithString_(DOCS_URL)
+		NSWorkspace.sharedWorkspace().openURL_(url)
+
+	@objc.python_method
+	def _copyConfigToClipboard(self, target):
+		"""Generate MCP config JSON and copy to clipboard."""
+		repo = self._repo_path
+		if repo is not None:
+			# Dev install — use local paths
+			command = os.path.join(repo, ".venv", "bin", "python")
+			args = [os.path.join(repo, "server", "glyphs_mcp_server.py")]
+		else:
+			# Plugin Manager install — use uvx
+			command = "uvx"
+			args = ["glyphs-mcp"]
+
+		if target == "claude":
+			config = {
+				"mcpServers": {
+					"glyphs-mcp": {
+						"command": command,
+						"args": args
+					}
+				}
+			}
+		elif target == "vscode":
+			config = {
+				"servers": {
+					"glyphs-mcp": {
+						"type": "stdio",
+						"command": command,
+						"args": args
+					}
+				}
+			}
+		else:
+			return
+
+		config_json = json.dumps(config, indent=2)
+		pb = NSPasteboard.generalPasteboard()
+		pb.clearContents()
+		pb.setString_forType_(config_json, "public.utf8-plain-text")
+
+		label = "Claude Code" if target == "claude" else "VS Code"
+		suffix = "" if repo else " (with placeholder paths)"
+		print(f"[GlyphsMCP] Copied {label} config to clipboard{suffix}")
 
 	@objc.python_method
 	def __del__(self):
