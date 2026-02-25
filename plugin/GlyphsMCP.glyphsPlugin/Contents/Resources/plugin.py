@@ -26,7 +26,7 @@ PREF_PORT = "com.glyphsmcp.port"
 PREF_AUTOSTART = "com.glyphsmcp.autostart"
 PREF_ALLOW_EXECUTE = "com.glyphsmcp.allowExecute"
 
-DOCS_URL = "https://github.com/glyphsapp-mcp/glyphsapp-mcp"
+DOCS_URL = "https://github.com/nmassi/glyphs-mcp"
 
 
 def _discover_repo_path():
