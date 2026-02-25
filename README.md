@@ -24,7 +24,7 @@ MCP Client  ←(stdio/MCP)→  MCP Server  ←(HTTP/localhost)→  GlyphsApp Plu
 
 **Manual install:** Download **GlyphsMCP.glyphsPlugin.zip** from the [latest release](https://github.com/nmassi/glyphs-mcp/releases/latest), unzip, and double-click to install.
 
-Restart GlyphsApp. You should see an **MCP** menu in the menu bar.
+Restart GlyphsApp. You should see **GlyphsMCP** under the _Window_ menu.
 
 ### 2. Connect your MCP client
 
@@ -49,10 +49,6 @@ claude mcp add glyphs-mcp -- uvx glyphs-mcp
 
 That's it.
 
-<p align="center">
-  <img src="assets/glyphs-mcp 01.png" alt="GlyphsMCP" width="600">
-</p>
-
 ### 3. Use it
 
 Open a font in GlyphsApp, then ask your AI assistant:
@@ -66,10 +62,6 @@ Open a font in GlyphsApp, then ask your AI assistant:
 > "Make the R 20% wider and harmonize the curves"
 
 ## Tools
-
-<p align="center">
-  <img src="assets/glyphs-mcp 02.png" alt="GlyphsMCP" width="600">
-</p>
 
 ### Read
 
@@ -116,12 +108,15 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | `check_junctions`        | Stem thinning at arch/bowl junctions                    |
 | `check_related_forms`    | Cross-validate figures and letters (0/O, 6/9, 8/S, 3/B) |
 | `check_punctuation`      | Mirrored pair widths, dash ratios, related punctuation  |
+| `check_compatibility`    | Master compatibility: paths, nodes, components, anchors |
+| `analyze_kerning`        | Kerning quality: cross-master gaps, orphans, outliers   |
+| `analyze_spacing`        | Spacing quality: sidebearing groups, symmetry, drift    |
 
 Analysis tools automatically mark glyphs in GlyphsApp: **red** = inconsistent, **orange** = unreliable, **yellow** = optical compensation, **green** = pass.
 
 ### RMX Tools
 
-Requires [RMX Tools](https://remix-tools.com/glyphsapp) for full functionality. Falls back to native transforms when RMX is unavailable.
+Requires RMX Tools for full functionality. Falls back to native transforms when RMX is unavailable.
 
 | Tool            | Description                                         |
 | --------------- | --------------------------------------------------- |
@@ -143,7 +138,7 @@ All tools accept an optional `master_id` parameter. When omitted, read/write too
 
 ## Menu
 
-The plugin adds an **MCP** menu to the menu bar:
+The plugin adds a **GlyphsMCP** submenu under _Window_ in the menu bar:
 
 - **Start/Stop Server** — toggle the HTTP server
 - **Connect** — copy ready-to-paste MCP config for Claude Code or VS Code (and forks)
@@ -158,10 +153,6 @@ The plugin adds an **MCP** menu to the menu bar:
 | `com.glyphsmcp.autostart`    | `true`  | Start server on GlyphsApp launch |
 | `com.glyphsmcp.allowExecute` | `false` | Enable the execute endpoint      |
 
-<p align="center">
-  <img src="assets/glyphs-mcp 03.png" alt="GlyphsMCP" width="600">
-</p>
-
 ## How it works
 
 The GlyphsApp plugin runs an HTTP server on `127.0.0.1:7745` inside GlyphsApp. All GlyphsApp API calls run on the main thread via a queue + NSTimer bridge for thread safety.
@@ -170,7 +161,7 @@ The MCP server is a thin translation layer — it receives MCP tool calls via st
 
 ## Roadmap
 
-- **Kerning analysis** — Multi-master kerning consistency checks, inspired by [Kern On](https://kern-on.com/manual/)
+- **Font proofing** — Generate proof strings for spacing/kerning evaluation
 - **Auto-update** — Check for updates directly from the GlyphsMCP menu
 - **Analytics** — Optional usage telemetry to guide development priorities
 
