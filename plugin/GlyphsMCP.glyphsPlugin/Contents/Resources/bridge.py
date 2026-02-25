@@ -43,7 +43,7 @@ class MainThreadBridge:
 	"""Dispatches work from background threads to the main thread via Queue + NSTimer."""
 
 	POLL_INTERVAL = 0.05  # 50ms = 20 checks/sec
-	TIMEOUT = 10.0         # Max wait for main thread response
+	TIMEOUT = 30.0         # Max wait for main thread response
 
 	def __init__(self):
 		self._queue = queue.Queue()

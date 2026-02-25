@@ -58,9 +58,11 @@ def _node_type_to_str(node_type):
 
 
 def _str_to_node_type(type_str):
-	"""Convert string to GSNode type constant."""
-	mapping = {"line": 1, "curve": 35, "offcurve": 65, "qcurve": 67}
-	return mapping.get(type_str.lower(), 1)
+	"""Convert string to GSNode type. Glyphs 3 uses strings directly."""
+	s = type_str.lower()
+	if s in ("line", "curve", "offcurve", "qcurve"):
+		return s
+	return "line"
 
 
 def _serialize_node(node):
@@ -439,9 +441,10 @@ def handle_set_glyph_paths(bridge, name, body=None, **kwargs):
 		else:
 			layer = glyph.layers[font.masters[0].id]
 
-		# Wrap in update block
+		# Wrap in update block with undo support
 		font.disableUpdateInterface()
 		try:
+			layer.beginChanges()
 			# Clear existing paths (layer.paths has no setter in Glyphs 3)
 			for p in list(layer.paths):
 				layer.removeShape_(p)
@@ -459,6 +462,7 @@ def handle_set_glyph_paths(bridge, name, body=None, **kwargs):
 
 			# Fix winding direction
 			layer.correctPathDirection()
+			layer.endChanges()
 
 		finally:
 			font.enableUpdateInterface()
@@ -509,6 +513,7 @@ def handle_create_glyph(bridge, body=None, **kwargs):
 		if paths_data:
 			font.disableUpdateInterface()
 			try:
+				layer.beginChanges()
 				for pdata in paths_data:
 					path = GSPath()
 					for ndata in pdata.get("nodes", []):
@@ -520,6 +525,7 @@ def handle_create_glyph(bridge, body=None, **kwargs):
 					path.closed = pdata.get("closed", True)
 					layer.paths.append(path)
 				layer.correctPathDirection()
+				layer.endChanges()
 			finally:
 				font.enableUpdateInterface()
 
@@ -555,7 +561,9 @@ def handle_set_width(bridge, name, body=None, **kwargs):
 		else:
 			layer = glyph.layers[font.masters[0].id]
 
+		layer.beginChanges()
 		layer.width = float(width)
+		layer.endChanges()
 		return {"ok": True, "glyphName": name, "width": float(layer.width)}
 
 	result = bridge.execute_on_main(_set_width)
@@ -651,7 +659,9 @@ def handle_set_glyph_color(bridge, name, body=None, **kwargs):
 		glyph = font.glyphs[name]
 		if glyph is None:
 			raise KeyError(f"Glyph '{name}' not found")
+		glyph.beginUndo()
 		glyph.color = color
+		glyph.endUndo()
 		return {"ok": True, "glyphName": name, "color": color}
 
 	result = bridge.execute_on_main(_set_color)
@@ -692,7 +702,9 @@ def handle_rename_glyph(bridge, name, body=None, **kwargs):
 			raise KeyError(f"Glyph '{name}' not found")
 		if font.glyphs[new_name]:
 			raise ValueError(f"Glyph '{new_name}' already exists")
+		glyph.beginUndo()
 		glyph.name = new_name
+		glyph.endUndo()
 		return {"ok": True, "oldName": name, "newName": new_name}
 
 	result = bridge.execute_on_main(_rename)
@@ -730,6 +742,7 @@ def handle_duplicate_glyph(bridge, name, body=None, **kwargs):
 				dst_layer = dst.layers[src_layer.layerId]
 				if dst_layer is None:
 					continue
+				dst_layer.beginChanges()
 				dst_layer.width = src_layer.width
 				for src_path in src_layer.paths:
 					path = GSPath()
@@ -741,6 +754,7 @@ def handle_duplicate_glyph(bridge, name, body=None, **kwargs):
 						path.nodes.append(node)
 					path.closed = src_path.closed
 					dst_layer.paths.append(path)
+				dst_layer.endChanges()
 		finally:
 			font.enableUpdateInterface()
 
@@ -765,7 +779,9 @@ def handle_set_glyph_unicode(bridge, name, body=None, **kwargs):
 		glyph = font.glyphs[name]
 		if glyph is None:
 			raise KeyError(f"Glyph '{name}' not found")
+		glyph.beginUndo()
 		glyph.unicode = unicode_val if unicode_val else None
+		glyph.endUndo()
 		return {"ok": True, "glyphName": name, "unicode": unicode_val}
 
 	result = bridge.execute_on_main(_set_unicode)
@@ -1746,11 +1762,13 @@ def handle_compare_stems(bridge, body=None, **kwargs):
 							worst = ev["color"]
 			worst_color[gname] = worst
 
-		# Apply colors to glyphs
+		# Apply colors to glyphs (with undo support)
 		for gname in glyph_names:
 			glyph = font.glyphs[gname]
 			if glyph is not None:
+				glyph.beginUndo()
 				glyph.color = worst_color.get(gname, 4)
+				glyph.endUndo()
 
 		result = {
 			"masters": per_master,
@@ -2081,7 +2099,9 @@ def handle_compare_color(bridge, body=None, **kwargs):
 		for gname, color in worst_per_glyph.items():
 			glyph = font.glyphs[gname]
 			if glyph:
+				glyph.beginUndo()
 				glyph.color = color
+				glyph.endUndo()
 
 		# Build response
 		response = {
@@ -2263,7 +2283,9 @@ def handle_color_audit(bridge, body=None, **kwargs):
 		for gname, color in worst_per_glyph.items():
 			glyph = font.glyphs[gname]
 			if glyph:
+				glyph.beginUndo()
 				glyph.color = color
+				glyph.endUndo()
 
 		return {
 			"masters": all_master_results,
@@ -2286,7 +2308,7 @@ def handle_color_audit(bridge, body=None, **kwargs):
 
 # ── POST /api/font/overshoots/check ──────────────────────────────────────────
 
-# Expected overshoot as percentage of zone height (from Designing Type)
+# Expected overshoot as percentage of zone height
 # Round forms overshoot ~1-2%, pointed forms need more than rounds.
 _OVERSHOOT_GLYPHS = {
 	# UC round — overshoot both top (capHeight) and bottom (baseline)
@@ -2587,7 +2609,9 @@ def handle_check_overshoots(bridge, body=None, **kwargs):
 		for gname, color in worst_color.items():
 			glyph = font.glyphs[gname]
 			if glyph:
+				glyph.beginUndo()
 				glyph.color = color
+				glyph.endUndo()
 
 		return {
 			"masters": all_master_results,
@@ -2595,7 +2619,7 @@ def handle_check_overshoots(bridge, body=None, **kwargs):
 			"industryGuidelines": {
 				"roundOvershoot": "~1-2% of zone height",
 				"pointedOvershoot": "should exceed round overshoot",
-				"source": "Designing Type (Karen Cheng)",
+				"source": "industry standard",
 			},
 			"colorLegend": {
 				"red (0)": "Missing or excessive overshoot",
@@ -2866,7 +2890,7 @@ _WIDTH_ORDER = [
 	("H", "F", "F must be narrower than H"),
 ]
 
-# Industry ranges from 18 Lineto fonts (all weights) — [min, max] as % of ref
+# Industry width ranges from professional fonts — [min, max] as % of ref
 _WIDTH_RANGES = {
 	# LC / n
 	"a": [83, 115], "b": [100, 115], "c": [66, 100], "d": [100, 115],
@@ -3091,11 +3115,13 @@ def handle_compare_proportions(bridge, body=None, **kwargs):
 				},
 			}
 
-		# Apply colors in GlyphsApp
+		# Apply colors in GlyphsApp (with undo support)
 		for gname in check_names:
 			glyph = font.glyphs[gname]
 			if glyph and gname in worst_colors:
+				glyph.beginUndo()
 				glyph.color = worst_colors[gname]
+				glyph.endUndo()
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3119,7 +3145,7 @@ _DIAG_GROUPS = {
 	"uc_MN":   {"members": ["M", "N"], "tolerance": 10.0, "note": "UC diagonal verticals"},
 }
 
-# Diagonal / straight stem ratio ranges from 18 Lineto fonts (Light/Regular weights)
+# Diagonal / straight stem ratio ranges from professional fonts
 # Diagonals can be thinner (optical) OR thicker (perpendicular compensation) than straight
 _DIAG_RATIO_RANGE = {
 	# LC diag / n stem
@@ -3328,11 +3354,13 @@ def handle_check_diagonals(bridge, body=None, **kwargs):
 				},
 			}
 
-		# Apply colors
+		# Apply colors (with undo support)
 		for gname in check_names:
 			glyph = font.glyphs[gname]
 			if glyph and gname in worst_colors:
+				glyph.beginUndo()
 				glyph.color = worst_colors[gname]
+				glyph.endUndo()
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3543,11 +3571,13 @@ def handle_check_junctions(bridge, body=None, **kwargs):
 				},
 			}
 
-		# Apply colors
+		# Apply colors (with undo support)
 		for gname in check_names:
 			glyph = font.glyphs[gname]
 			if glyph and gname in worst_colors:
+				glyph.beginUndo()
 				glyph.color = worst_colors[gname]
+				glyph.endUndo()
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3562,8 +3592,7 @@ def handle_check_junctions(bridge, body=None, **kwargs):
 
 
 # ── Related forms: cross-validation between figures and letters ───────────────
-# Derived from Karen Cheng "Designing Type" + measurements across 18 Lineto fonts
-# (6 families x 3 weights: Circular, Supreme, Riforma, Moderne, Medium, Kristall)
+# Derived from industry patterns across professional fonts
 
 # Each pair: (glyph_a, glyph_b) -> range of width_a / width_b * 100
 # severity: "high" = likely error, "medium" = worth checking, "low" = informational
@@ -3672,11 +3701,13 @@ def handle_check_related_forms(bridge, body=None, **kwargs):
 				"summary": summary,
 			}
 
-		# Mark glyphs in GlyphsApp
+		# Mark glyphs in GlyphsApp (with undo support)
 		for gname, color in worst_colors.items():
 			glyph = font.glyphs[gname]
 			if glyph:
+				glyph.beginUndo()
 				glyph.color = color
+				glyph.endUndo()
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3691,7 +3722,7 @@ def handle_check_related_forms(bridge, body=None, **kwargs):
 
 
 # ── Punctuation consistency ──────────────────────────────────────────────────
-# Derived from Karen Cheng "Designing Type" ch.7 + measurements across Lineto fonts
+# Derived from industry patterns across professional fonts
 
 # Width-match checks: pairs that should have identical or near-identical widths
 # "tolerance" is max allowed % deviation from 100%
@@ -3852,11 +3883,13 @@ def handle_check_punctuation(bridge, body=None, **kwargs):
 				"summary": summary,
 			}
 
-		# Mark glyphs
+		# Mark glyphs (with undo support)
 		for gname, color in worst_colors.items():
 			glyph = font.glyphs[gname]
 			if glyph:
+				glyph.beginUndo()
 				glyph.color = color
+				glyph.endUndo()
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3896,6 +3929,903 @@ def _to_ns_array(val, n_masters):
 	return arr
 
 
+# ── POST /api/font/compatibility/check ────────────────────────────────────────
+
+def _clean_compat_details(layer_info):
+	"""Strip internal fields (types, directions) from compatibility details."""
+	clean = {}
+	for mname, info in layer_info.items():
+		entry = {
+			"paths": info["paths"],
+			"nodes": info["nodes"],
+			"components": info["components"],
+			"anchors": info["anchors"],
+			"width": info["width"],
+		}
+		if "pathCenters" in info:
+			entry["pathCenters"] = info["pathCenters"]
+		if "startNodes" in info:
+			entry["startNodes"] = info["startNodes"]
+		clean[mname] = entry
+	return clean
+
+
+def _path_center(path):
+	"""Return (cx, cy) center of a path's bounding box."""
+	b = path.bounds
+	if b is None:
+		return (0, 0)
+	return (round(b.origin.x + b.size.width / 2), round(b.origin.y + b.size.height / 2))
+
+
+def _start_node_pos(path):
+	"""Return (x, y) of the first on-curve node of a path."""
+	for n in path.nodes:
+		if str(n.type) in ("line", "curve", "qcurve"):
+			return (round(n.position.x), round(n.position.y))
+	# fallback: first node regardless of type
+	if path.nodes:
+		n = path.nodes[0]
+		return (round(n.position.x), round(n.position.y))
+	return (0, 0)
+
+
+@route("POST", "/api/font/compatibility/check")
+def handle_check_compatibility(bridge, body=None, **kwargs):
+	"""Check master compatibility for all (or specified) glyphs.
+
+	Compares layers across masters for: path count, node count, node types,
+	path direction, components, and anchors. Reports incompatibilities.
+	Marks glyphs: red=incompatible, orange=empty/missing, green=compatible.
+	"""
+	glyph_names = (body or {}).get("glyphNames", None)
+
+	def _run():
+		from GlyphsApp import Glyphs
+		font = _require_font()
+
+		if len(font.masters) < 2:
+			return {"ok": True, "error": "Font has only 1 master, nothing to compare"}
+
+		masters = list(font.masters)
+		master_ids = [str(m.id) for m in masters]
+		master_names = [str(m.name) for m in masters]
+
+		# Determine glyphs to check
+		if glyph_names:
+			check_glyphs = [font.glyphs[n] for n in glyph_names if font.glyphs[n]]
+		else:
+			check_glyphs = list(font.glyphs)
+
+		results = []
+		counts = {"compatible": 0, "incompatible": 0, "emptyOrMissing": 0}
+
+		for glyph in check_glyphs:
+			gname = glyph.name
+			issues = []
+			layer_info = {}
+
+			# Gather layer data for each master
+			for mid, mname in zip(master_ids, master_names):
+				layer = glyph.layers[mid]
+				npaths = len(layer.paths) if layer else 0
+				ncomps = len(layer.components) if layer else 0
+				nanchors = len(layer.anchors) if layer else 0
+				nodes_per_path = [len(p.nodes) for p in layer.paths] if layer and npaths > 0 else []
+				types_per_path = [
+					[str(n.type) for n in p.nodes] for p in layer.paths
+				] if layer and npaths > 0 else []
+				dirs_per_path = [int(p.direction) for p in layer.paths] if layer and npaths > 0 else []
+				centers = [_path_center(p) for p in layer.paths] if layer and npaths > 0 else []
+				starts = [_start_node_pos(p) for p in layer.paths] if layer and npaths > 0 else []
+				comp_names = [str(c.componentName) for c in layer.components] if layer and ncomps > 0 else []
+				anchor_names = sorted([str(a.name) for a in layer.anchors]) if layer and nanchors > 0 else []
+
+				layer_info[mname] = {
+					"paths": npaths,
+					"nodes": nodes_per_path,
+					"types": types_per_path,
+					"directions": dirs_per_path,
+					"pathCenters": centers,
+					"startNodes": starts,
+					"components": comp_names,
+					"anchors": anchor_names,
+					"width": float(layer.width) if layer else 0,
+				}
+
+			# Compare across masters
+			infos = list(layer_info.values())
+			names = list(layer_info.keys())
+
+			# Check if all layers are empty
+			all_empty = all(v["paths"] == 0 and len(v["components"]) == 0 for v in infos)
+			if all_empty:
+				color = 1  # orange — nothing drawn
+				issues.append("All layers empty")
+				counts["emptyOrMissing"] += 1
+				results.append({
+					"glyph": gname,
+					"compatible": False,
+					"color": color,
+					"issues": issues,
+					"details": _clean_compat_details(layer_info),
+				})
+				glyph.beginUndo()
+				glyph.color = color
+				glyph.endUndo()
+				continue
+
+			# Check if some layers are empty while others have content
+			drawn = [i for i, v in enumerate(infos) if v["paths"] > 0 or len(v["components"]) > 0]
+			if len(drawn) < len(infos):
+				drawn_names = [names[i] for i in drawn]
+				missing_names = [names[i] for i in range(len(infos)) if i not in drawn]
+				issues.append(f"Only drawn in {len(drawn)} of {len(infos)} masters (missing: {', '.join(missing_names)})")
+
+			# Use first drawn master as reference
+			ref_idx = drawn[0]
+			ref = infos[ref_idx]
+			ref_name = names[ref_idx]
+
+			for i in drawn[1:]:
+				other = infos[i]
+				other_name = names[i]
+
+				# Path count
+				if other["paths"] != ref["paths"]:
+					issues.append(f"Path count: {ref_name}={ref['paths']}, {other_name}={other['paths']}")
+					continue  # can't compare further if path count differs
+
+				# Per-path checks
+				for pi in range(ref["paths"]):
+					# Node count
+					if ref["nodes"][pi] != other["nodes"][pi]:
+						issues.append(f"Path {pi} node count: {ref_name}={ref['nodes'][pi]}, {other_name}={other['nodes'][pi]}")
+						continue
+
+					# Node types
+					if ref["types"][pi] != other["types"][pi]:
+						diffs = []
+						for ni, (rt, ot) in enumerate(zip(ref["types"][pi], other["types"][pi])):
+							if rt != ot:
+								diffs.append(f"node {ni}: {rt}→{ot}")
+						issues.append(f"Path {pi} node types differ ({other_name}): {', '.join(diffs[:5])}")
+
+					# Path direction
+					if ref["directions"][pi] != other["directions"][pi]:
+						issues.append(f"Path {pi} direction: {ref_name}={ref['directions'][pi]}, {other_name}={other['directions'][pi]}")
+
+				# Path order check — compare bounding box centers
+				# If paths have same structure but different spatial order, interpolation breaks
+				if ref["paths"] > 1 and ref["pathCenters"] and other["pathCenters"]:
+					ref_centers = ref["pathCenters"]
+					other_centers = other["pathCenters"]
+					# Check if the spatial ordering of paths differs
+					# Sort both by (x, y) center and see if the index mapping matches
+					ref_order = sorted(range(len(ref_centers)), key=lambda k: (ref_centers[k][0], ref_centers[k][1]))
+					other_order = sorted(range(len(other_centers)), key=lambda k: (other_centers[k][0], other_centers[k][1]))
+					if ref_order != other_order:
+						# Build a readable description of the mismatch
+						ref_desc = [f"path {idx} at ({ref_centers[idx][0]},{ref_centers[idx][1]})" for idx in ref_order]
+						other_desc = [f"path {idx} at ({other_centers[idx][0]},{other_centers[idx][1]})" for idx in other_order]
+						issues.append(
+							f"Path order mismatch: {ref_name} spatial order [{', '.join(str(x) for x in ref_order)}], "
+							f"{other_name} spatial order [{', '.join(str(x) for x in other_order)}]"
+						)
+
+				# Starting node check — corresponding paths should start at similar positions
+				if ref["paths"] > 0 and ref["startNodes"] and other["startNodes"]:
+					for pi in range(min(len(ref["startNodes"]), len(other["startNodes"]))):
+						rs = ref["startNodes"][pi]
+						os_ = other["startNodes"][pi]
+						# Allow generous tolerance — we just want to catch completely wrong starts
+						# Use relative threshold: 30% of glyph width or 100u, whichever is larger
+						threshold = max(100, ref["width"] * 0.3) if ref["width"] > 0 else 100
+						dx = abs(rs[0] - os_[0])
+						dy = abs(rs[1] - os_[1])
+						if dx > threshold or dy > threshold:
+							issues.append(
+								f"Path {pi} start node mismatch: {ref_name}=({rs[0]},{rs[1]}), "
+								f"{other_name}=({os_[0]},{os_[1]})"
+							)
+
+				# Component count and names
+				if len(other["components"]) != len(ref["components"]):
+					issues.append(f"Component count: {ref_name}={len(ref['components'])}, {other_name}={len(other['components'])}")
+				elif other["components"] != ref["components"]:
+					issues.append(f"Component names differ: {ref_name}={ref['components']}, {other_name}={other['components']}")
+
+				# Anchor count and names
+				if other["anchors"] != ref["anchors"]:
+					issues.append(f"Anchors differ: {ref_name}={ref['anchors']}, {other_name}={other['anchors']}")
+
+			# Determine verdict
+			if not issues:
+				color = 4  # green
+				compatible = True
+				counts["compatible"] += 1
+			elif any("Only drawn" in iss for iss in issues) and len(issues) == 1:
+				color = 1  # orange — missing drawing
+				compatible = False
+				counts["emptyOrMissing"] += 1
+			else:
+				color = 0  # red — real incompatibility
+				compatible = False
+				counts["incompatible"] += 1
+
+			# Strip verbose internal fields from details for response
+			clean_details = _clean_compat_details(layer_info)
+
+			results.append({
+				"glyph": gname,
+				"compatible": compatible,
+				"color": color,
+				"issues": issues,
+				"details": clean_details,
+			})
+
+			glyph.beginUndo()
+			glyph.color = color
+			glyph.endUndo()
+
+		return {
+			"ok": True,
+			"masterCount": len(masters),
+			"masters": master_names,
+			"glyphCount": len(check_glyphs),
+			"summary": counts,
+			"glyphs": results,
+			"colorLegend": {
+				"red (0)": "incompatible masters",
+				"orange (1)": "empty or missing drawing",
+				"light green (4)": "compatible",
+			},
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
+	return 200, result
+
+
+# ── POST /api/font/kerning/analyze ────────────────────────────────────────────
+
+def _resolve_kern_key(key, glyph_id_map):
+	"""Resolve a kerning key to a human-readable name.
+
+	Returns (resolved_name, is_group).
+	- @MMK_ keys are group names, returned as-is.
+	- Other keys are glyph IDs, resolved via glyph_id_map.
+	"""
+	key_str = str(key)
+	if key_str.startswith("@MMK_"):
+		return key_str, True
+	# It's a glyph ID
+	name = glyph_id_map.get(key_str, key_str)
+	return name, False
+
+
+@route("POST", "/api/font/kerning/analyze")
+def handle_analyze_kerning(bridge, body=None, **kwargs):
+	"""Analyze kerning quality across masters.
+
+	Checks: cross-master missing pairs, sign changes, outlier values,
+	redundant exceptions, group orphans. Marks glyphs in GlyphsApp.
+	"""
+	def _run():
+		from GlyphsApp import Glyphs
+		font = _require_font()
+
+		if len(font.masters) < 2:
+			# Single master — skip cross-master checks, still do quality checks
+			pass
+
+		masters = list(font.masters)
+		master_ids = [str(m.id) for m in masters]
+		master_names = [str(m.name) for m in masters]
+		upm = int(font.upm)
+
+		# Build glyph ID → name map
+		glyph_id_map = {}
+		for g in font.glyphs:
+			glyph_id_map[str(g.id)] = str(g.name)
+
+		# Build group membership map
+		group_members = {}  # {"@MMK_L_V": ["V", "Vacute", ...]}
+		for g in font.glyphs:
+			lg = g.leftKerningGroup
+			rg = g.rightKerningGroup
+			if lg:
+				gk = "@MMK_L_" + str(lg)
+				group_members.setdefault(gk, []).append(str(g.name))
+			if rg:
+				gk = "@MMK_R_" + str(rg)
+				group_members.setdefault(gk, []).append(str(g.name))
+
+		# ── Per-master analysis ──
+		per_master = {}
+		# normalized_pairs[master_name] = {(left_resolved, right_resolved): value}
+		normalized_pairs = {}
+
+		for mid, mname in zip(master_ids, master_names):
+			kerning = font.kerning.get(mid, {})
+			pairs_resolved = []
+			n_group = 0
+			n_exception = 0
+			values = []
+			norm = {}
+
+			for left_key, rights in kerning.items():
+				left_name, left_is_group = _resolve_kern_key(left_key, glyph_id_map)
+				for right_key, val in rights.items():
+					right_name, right_is_group = _resolve_kern_key(right_key, glyph_id_map)
+					v = float(val)
+					values.append(v)
+					is_group_pair = left_is_group and right_is_group
+					if is_group_pair:
+						n_group += 1
+					else:
+						n_exception += 1
+
+					pairs_resolved.append({
+						"left": left_name,
+						"right": right_name,
+						"leftKey": str(left_key),
+						"rightKey": str(right_key),
+						"value": v,
+						"isGroup": is_group_pair,
+					})
+					norm[(left_name, right_name)] = v
+
+			normalized_pairs[mname] = norm
+
+			# Outlier check
+			outlier_threshold = upm * 0.4
+			outliers = []
+			for p in pairs_resolved:
+				if abs(p["value"]) > outlier_threshold:
+					outliers.append({
+						"left": p["left"],
+						"right": p["right"],
+						"value": p["value"],
+						"percentUpm": round(abs(p["value"]) / upm * 100, 1),
+					})
+
+			# Exception analysis — check if glyph-level pairs are redundant
+			redundant = []
+			for p in pairs_resolved:
+				if p["isGroup"]:
+					continue
+				# Find what group pair would cover this
+				left_key_str = str(p["leftKey"])
+				right_key_str = str(p["rightKey"])
+				# Determine the group keys
+				left_group_key = left_key_str if left_key_str.startswith("@MMK_") else None
+				right_group_key = right_key_str if right_key_str.startswith("@MMK_") else None
+
+				if not left_group_key:
+					# Look up glyph's group
+					glyph = font.glyphs[glyph_id_map.get(left_key_str, "")]
+					if glyph and glyph.leftKerningGroup:
+						left_group_key = "@MMK_L_" + str(glyph.leftKerningGroup)
+				if not right_group_key:
+					glyph = font.glyphs[glyph_id_map.get(right_key_str, "")]
+					if glyph and glyph.rightKerningGroup:
+						right_group_key = "@MMK_R_" + str(glyph.rightKerningGroup)
+
+				if left_group_key and right_group_key:
+					# Check if the group pair exists
+					group_val = kerning.get(left_group_key, {}).get(right_group_key)
+					if group_val is not None and float(group_val) == p["value"]:
+						redundant.append({
+							"left": p["left"],
+							"right": p["right"],
+							"value": p["value"],
+							"groupValue": float(group_val),
+						})
+
+			stats = {
+				"totalPairs": len(pairs_resolved),
+				"groupPairs": n_group,
+				"exceptions": n_exception,
+				"minValue": round(min(values), 1) if values else 0,
+				"maxValue": round(max(values), 1) if values else 0,
+			}
+
+			per_master[mname] = {
+				"masterId": mid,
+				"stats": stats,
+				"outliers": outliers[:50],
+				"outlierCount": len(outliers),
+				"redundant": redundant[:50],
+				"redundantCount": len(redundant),
+			}
+
+		# ── Cross-master checks ──
+		cross_master = {"missingPairs": [], "signChanges": []}
+
+		if len(masters) >= 2:
+			# Collect all unique pairs across masters
+			all_pairs = set()
+			for norm in normalized_pairs.values():
+				all_pairs.update(norm.keys())
+
+			for pair in sorted(all_pairs):
+				present_in = []
+				missing_from = []
+				vals = {}
+				for mname in master_names:
+					if pair in normalized_pairs[mname]:
+						present_in.append(mname)
+						vals[mname] = normalized_pairs[mname][pair]
+					else:
+						missing_from.append(mname)
+
+				# Missing pair check
+				if missing_from and present_in:
+					cross_master["missingPairs"].append({
+						"left": pair[0],
+						"right": pair[1],
+						"presentIn": present_in,
+						"missingFrom": missing_from,
+					})
+
+				# Sign change check
+				if len(vals) >= 2:
+					v_list = list(vals.values())
+					has_pos = any(v > 0 for v in v_list)
+					has_neg = any(v < 0 for v in v_list)
+					if has_pos and has_neg:
+						cross_master["signChanges"].append({
+							"left": pair[0],
+							"right": pair[1],
+							"values": vals,
+						})
+
+			# Cap output
+			cross_master["missingPairCount"] = len(cross_master["missingPairs"])
+			cross_master["missingPairs"] = cross_master["missingPairs"][:50]
+			cross_master["signChangeCount"] = len(cross_master["signChanges"])
+			cross_master["signChanges"] = cross_master["signChanges"][:50]
+
+		# ── Group orphans ──
+		orphans = {"missingLeft": [], "missingRight": [], "missingBoth": []}
+		for g in font.glyphs:
+			if g.category != "Letter":
+				continue
+			has_left = bool(g.leftKerningGroup)
+			has_right = bool(g.rightKerningGroup)
+			gname = str(g.name)
+			if not has_left and not has_right:
+				orphans["missingBoth"].append(gname)
+			elif not has_left:
+				orphans["missingLeft"].append(gname)
+			elif not has_right:
+				orphans["missingRight"].append(gname)
+
+		# ── Color marking ──
+		# Collect glyphs to mark
+		glyphs_red = set()    # cross-master issues
+		glyphs_yellow = set() # outliers, redundant
+
+		# Cross-master: mark glyphs involved in missing/sign-change pairs
+		for issue in cross_master["missingPairs"] + cross_master["signChanges"]:
+			for side in ("left", "right"):
+				name = issue[side]
+				if name.startswith("@MMK_"):
+					# Mark the primary glyph of the group
+					members = group_members.get(name, [])
+					# Try to find glyph whose name matches group suffix
+					group_suffix = name.split("_", 2)[-1] if "_" in name else ""
+					if group_suffix and font.glyphs[group_suffix]:
+						glyphs_red.add(group_suffix)
+					elif members:
+						glyphs_red.add(members[0])
+				else:
+					if font.glyphs[name]:
+						glyphs_red.add(name)
+
+		# Outliers
+		for mdata in per_master.values():
+			for o in mdata["outliers"]:
+				for side in ("left", "right"):
+					name = o[side]
+					if not name.startswith("@MMK_") and font.glyphs[name]:
+						glyphs_yellow.add(name)
+
+		# Apply colors (red overrides yellow)
+		for gname in glyphs_red:
+			g = font.glyphs[gname]
+			if g:
+				g.beginUndo()
+				g.color = 0
+				g.endUndo()
+		for gname in glyphs_yellow - glyphs_red:
+			g = font.glyphs[gname]
+			if g:
+				g.beginUndo()
+				g.color = 3
+				g.endUndo()
+
+		return {
+			"ok": True,
+			"masterCount": len(masters),
+			"masters": master_names,
+			"upm": upm,
+			"perMaster": per_master,
+			"crossMaster": cross_master,
+			"groupOrphans": orphans,
+			"colorLegend": {
+				"red (0)": "cross-master issue (missing pair or sign change)",
+				"yellow (3)": "outlier value or quality warning",
+			},
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
+	return 200, result
+
+
+# ── POST /api/font/spacing/analyze ────────────────────────────────────────────
+
+# Sidebearing groups based on standard spacing conventions
+_SB_GROUPS = {
+	# Lowercase LSB groups
+	"lc_lsb_straight": {
+		"ref": "n", "side": "LSB", "case": "lowercase",
+		"members": ["h", "i", "k", "l", "m", "n", "p", "r"],
+		"tolerance": 10,  # percentage of group average
+	},
+	"lc_lsb_round": {
+		"ref": "o", "side": "LSB", "case": "lowercase",
+		"members": ["c", "d", "e", "g", "o", "q"],
+		"tolerance": 15,
+	},
+	# Lowercase RSB groups
+	"lc_rsb_straight": {
+		"ref": "n", "side": "RSB", "case": "lowercase",
+		"members": ["a", "h", "m", "n", "u"],
+		"tolerance": 10,
+	},
+	"lc_rsb_round": {
+		"ref": "o", "side": "RSB", "case": "lowercase",
+		"members": ["b", "e", "o", "p"],
+		"tolerance": 15,
+	},
+	# Uppercase LSB groups
+	"uc_lsb_straight": {
+		"ref": "H", "side": "LSB", "case": "uppercase",
+		"members": ["B", "D", "E", "F", "H", "I", "K", "L", "M", "N", "P", "R"],
+		"tolerance": 10,
+	},
+	"uc_lsb_round": {
+		"ref": "O", "side": "LSB", "case": "uppercase",
+		"members": ["C", "G", "O", "Q"],
+		"tolerance": 15,
+	},
+	# Uppercase RSB groups
+	"uc_rsb_straight": {
+		"ref": "H", "side": "RSB", "case": "uppercase",
+		"members": ["H", "I", "U"],
+		"tolerance": 10,
+	},
+	"uc_rsb_round": {
+		"ref": "O", "side": "RSB", "case": "uppercase",
+		"members": ["D", "O", "Q"],
+		"tolerance": 15,
+	},
+}
+
+# Glyphs that should have LSB ≈ RSB
+_SYMMETRIC_GLYPHS = [
+	"o", "O", "H", "I", "X", "x", "zero",
+]
+
+# Expected reference ratios
+_SPACING_RATIOS = {
+	"n_over_o_lsb": {"num": "n", "den": "o", "side": "LSB", "range": [1.2, 2.0], "label": "n/o LSB"},
+	"H_over_O_lsb": {"num": "H", "den": "O", "side": "LSB", "range": [1.2, 2.0], "label": "H/O LSB"},
+}
+
+
+def _measure_margin_areas(layer, zone_top, zone_bottom, resolution, NSPoint):
+	"""Measure left and right white space areas using scanlines.
+
+	Returns dict with leftArea, rightArea, lsb, rsb, width, or None if empty.
+	"""
+	if zone_top <= zone_bottom or layer.width <= 0:
+		return None
+
+	width = float(layer.width)
+	left_area = 0.0
+	right_area = 0.0
+	y = zone_bottom + resolution / 2.0
+	scanlines = 0
+
+	while y < zone_top:
+		p1 = NSPoint(-1, y)
+		p2 = NSPoint(width + 1, y)
+		raw = layer.intersectionsBetweenPoints(p1, p2)
+		if raw:
+			xs = sorted([float(p.x) for p in raw])
+			xs = [x for x in xs if -0.5 <= x <= width + 0.5]
+			if len(xs) >= 2:
+				leftmost = max(0, xs[0])
+				rightmost = min(width, xs[-1])
+				left_area += leftmost
+				right_area += (width - rightmost)
+				scanlines += 1
+		y += resolution
+
+	if scanlines == 0:
+		return None
+
+	return {
+		"leftArea": round(left_area * resolution, 1),
+		"rightArea": round(right_area * resolution, 1),
+		"lsb": round(float(layer.LSB), 1) if layer.LSB is not None else 0,
+		"rsb": round(float(layer.RSB), 1) if layer.RSB is not None else 0,
+		"width": round(width, 1),
+	}
+
+
+@route("POST", "/api/font/spacing/analyze")
+def handle_analyze_spacing(bridge, body=None, **kwargs):
+	"""Analyze spacing quality across masters.
+
+	Checks sidebearing group consistency, symmetry, reference ratios,
+	and cross-master spacing drift. Marks glyphs in GlyphsApp.
+	"""
+	master_id = (body or {}).get("masterId", "")
+	glyph_names = (body or {}).get("glyphNames", None)
+
+	def _run():
+		from GlyphsApp import Glyphs
+		from Foundation import NSPoint
+		font = _require_font()
+
+		masters = list(font.masters)
+		if master_id:
+			masters = [m for m in masters if str(m.id) == master_id]
+			if not masters:
+				return {"error": f"Master '{master_id}' not found"}
+
+		master_ids = [str(m.id) for m in masters]
+		master_names = [str(m.name) for m in masters]
+
+		# Determine glyphs to analyze
+		if glyph_names:
+			check_glyphs = [font.glyphs[n] for n in glyph_names if font.glyphs[n]]
+		else:
+			check_glyphs = [g for g in font.glyphs if g.category == "Letter"]
+
+		resolution = 5  # 5u scanline resolution
+
+		per_master = {}
+		# {master_name: {glyph_name: {lsb, rsb, width, leftArea, rightArea}}}
+		all_measurements = {}
+
+		for mid, mname in zip(master_ids, master_names):
+			master_obj = next(m for m in font.masters if str(m.id) == mid)
+			x_height = float(master_obj.xHeight) if master_obj.xHeight else 500
+			cap_height = float(master_obj.capHeight) if master_obj.capHeight else 700
+
+			measurements = {}
+			for glyph in check_glyphs:
+				gname = str(glyph.name)
+				layer = glyph.layers[mid]
+				if not layer or not layer.paths:
+					# Try with components
+					if layer and layer.components:
+						clean = layer.copyDecomposedLayer()
+						clean.removeOverlap()
+					else:
+						continue
+				else:
+					clean = layer.copyDecomposedLayer()
+					clean.removeOverlap()
+
+				# Determine zone
+				cls = _classify_glyph(glyph)
+				if cls == "lowercase":
+					zone_top = x_height
+					zone_bottom = 0
+				elif cls in ("uppercase", "figure"):
+					zone_top = cap_height
+					zone_bottom = 0
+				else:
+					continue
+
+				result = _measure_margin_areas(clean, zone_top, zone_bottom, resolution, NSPoint)
+				if result:
+					measurements[gname] = result
+
+			all_measurements[mname] = measurements
+
+			# ── Group consistency checks ──
+			group_issues = []
+			for gid, ginfo in _SB_GROUPS.items():
+				side = ginfo["side"]
+				members_present = [m for m in ginfo["members"] if m in measurements]
+				if len(members_present) < 2:
+					continue
+
+				values = {m: measurements[m][side.lower()] for m in members_present}
+				avg = sum(values.values()) / len(values)
+				if avg == 0:
+					continue
+
+				tol_pct = ginfo["tolerance"]
+				abs_tol = max(5, abs(avg) * tol_pct / 100.0)
+
+				for m, v in values.items():
+					dev = v - avg
+					if abs(dev) > abs_tol:
+						group_issues.append({
+							"glyph": m,
+							"side": side,
+							"value": v,
+							"groupAvg": round(avg, 1),
+							"deviation": round(dev, 1),
+							"group": gid,
+							"ref": ginfo["ref"],
+						})
+
+			# ── Symmetry checks ──
+			symmetry_issues = []
+			for gname in _SYMMETRIC_GLYPHS:
+				if gname not in measurements:
+					continue
+				m = measurements[gname]
+				diff = abs(m["lsb"] - m["rsb"])
+				tol = max(5, m["width"] * 0.05)
+				if diff > tol:
+					symmetry_issues.append({
+						"glyph": gname,
+						"lsb": m["lsb"],
+						"rsb": m["rsb"],
+						"difference": round(diff, 1),
+					})
+
+			# ── Reference ratios ──
+			ratios = []
+			for rid, rinfo in _SPACING_RATIOS.items():
+				num_name = rinfo["num"]
+				den_name = rinfo["den"]
+				side_key = rinfo["side"].lower()
+				if num_name not in measurements or den_name not in measurements:
+					continue
+				num_val = measurements[num_name][side_key]
+				den_val = measurements[den_name][side_key]
+				if den_val == 0:
+					continue
+				ratio = round(num_val / den_val, 2)
+				lo, hi = rinfo["range"]
+				verdict = "pass" if lo <= ratio <= hi else "warning"
+				ratios.append({
+					"label": rinfo["label"],
+					"numGlyph": num_name,
+					"denGlyph": den_name,
+					"numValue": num_val,
+					"denValue": den_val,
+					"ratio": ratio,
+					"expectedRange": rinfo["range"],
+					"verdict": verdict,
+				})
+
+			per_master[mname] = {
+				"masterId": mid,
+				"glyphCount": len(measurements),
+				"groupIssues": group_issues,
+				"groupIssueCount": len(group_issues),
+				"symmetryIssues": symmetry_issues,
+				"symmetryIssueCount": len(symmetry_issues),
+				"ratios": ratios,
+			}
+
+		# ── Cross-master spacing drift ──
+		cross_master_drift = []
+		if len(masters) >= 2:
+			ref_mname = master_names[0]
+			ref_data = all_measurements.get(ref_mname, {})
+			for mname in master_names[1:]:
+				other_data = all_measurements.get(mname, {})
+				# Check if spacing relationships change
+				# For each glyph in both masters, compare LSB/RSB ratios relative to reference (n or H)
+				for glyph in check_glyphs:
+					gname = str(glyph.name)
+					if gname not in ref_data or gname not in other_data:
+						continue
+					cls = _classify_glyph(glyph)
+					ref_glyph = "n" if cls == "lowercase" else "H"
+					if ref_glyph == gname:
+						continue
+					if ref_glyph not in ref_data or ref_glyph not in other_data:
+						continue
+
+					for side_key in ("lsb", "rsb"):
+						ref_ref_val = ref_data[ref_glyph][side_key]
+						ref_glyph_val = ref_data[gname][side_key]
+						other_ref_val = other_data[ref_glyph][side_key]
+						other_glyph_val = other_data[gname][side_key]
+
+						if ref_ref_val == 0 or other_ref_val == 0:
+							continue
+
+						ref_ratio = ref_glyph_val / ref_ref_val
+						other_ratio = other_glyph_val / other_ref_val
+						ratio_diff = abs(ref_ratio - other_ratio)
+
+						if ratio_diff > 0.25:  # >25% ratio change across masters
+							cross_master_drift.append({
+								"glyph": gname,
+								"side": side_key.upper(),
+								"masterA": ref_mname,
+								"masterB": mname,
+								"valueA": ref_glyph_val,
+								"valueB": other_glyph_val,
+								"ratioA": round(ref_ratio, 2),
+								"ratioB": round(other_ratio, 2),
+							})
+
+		# ── Color marking ──
+		glyphs_red = set()
+		glyphs_yellow = set()
+
+		for mdata in per_master.values():
+			for gi in mdata["groupIssues"]:
+				if abs(gi["deviation"]) > max(10, abs(gi["groupAvg"]) * 0.2):
+					glyphs_red.add(gi["glyph"])
+				else:
+					glyphs_yellow.add(gi["glyph"])
+			for si in mdata["symmetryIssues"]:
+				glyphs_yellow.add(si["glyph"])
+
+		for d in cross_master_drift:
+			glyphs_red.add(d["glyph"])
+
+		for gname in glyphs_red:
+			g = font.glyphs[gname]
+			if g:
+				g.beginUndo()
+				g.color = 0
+				g.endUndo()
+		for gname in glyphs_yellow - glyphs_red:
+			g = font.glyphs[gname]
+			if g:
+				g.beginUndo()
+				g.color = 3
+				g.endUndo()
+		# Mark passing glyphs green
+		all_flagged = glyphs_red | glyphs_yellow
+		for glyph in check_glyphs:
+			gname = str(glyph.name)
+			if gname not in all_flagged and gname in all_measurements.get(master_names[0], {}):
+				glyph.beginUndo()
+				glyph.color = 4
+				glyph.endUndo()
+
+		return {
+			"ok": True,
+			"masterCount": len(masters),
+			"masters": master_names,
+			"perMaster": per_master,
+			"crossMasterDrift": cross_master_drift[:50],
+			"crossMasterDriftCount": len(cross_master_drift),
+			"colorLegend": {
+				"red (0)": "significant spacing inconsistency",
+				"yellow (3)": "minor deviation or asymmetry",
+				"light green (4)": "passed",
+			},
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
+	return 200, result
+
+
 # ── POST /api/filters/rmx/harmonize ──────────────────────────────────────────
 
 @route("POST", "/api/filters/rmx/harmonize")
@@ -3922,6 +4852,7 @@ def handle_rmx_harmonize(bridge, body=None, **kwargs):
 
 		font.disableUpdateInterface()
 		try:
+			layer.beginChanges()
 			if mode == "extract handles":
 				harmonizer.extractHandles_(layer)
 			elif mode == "dekink":
@@ -3932,6 +4863,7 @@ def handle_rmx_harmonize(bridge, body=None, **kwargs):
 				harmonizer.superDiagonals_(layer)
 			elif mode == "supersmooth all":
 				harmonizer.superAll_(layer)
+			layer.endChanges()
 		finally:
 			font.enableUpdateInterface()
 
@@ -4266,6 +5198,7 @@ def handle_rmx_scale(bridge, body=None, **kwargs):
 
 		font.disableUpdateInterface()
 		try:
+			layer.beginChanges()
 			rmx_ok = False
 			if _get_rmx_class("RMXScaler") is not None:
 				try:
@@ -4290,6 +5223,7 @@ def handle_rmx_scale(bridge, body=None, **kwargs):
 			if not rmx_ok:
 				method = "native_transform"
 				_scale_native(layer, width_pct, height_pct, adjust_space, vertical_shift)
+			layer.endChanges()
 		finally:
 			font.enableUpdateInterface()
 
@@ -4337,6 +5271,7 @@ def handle_rmx_monospace(bridge, body=None, **kwargs):
 
 		font.disableUpdateInterface()
 		try:
+			layer.beginChanges()
 			rmx_ok = False
 			if _get_rmx_class("RMXMonospacer") is not None and target != int(width_before):
 				try:
@@ -4364,6 +5299,7 @@ def handle_rmx_monospace(bridge, body=None, **kwargs):
 					xform.scaleXBy_yBy_(outline_scale_x, 1.0)
 					layer.transform_(xform)
 				layer.width = target
+			layer.endChanges()
 		finally:
 			font.enableUpdateInterface()
 

@@ -4,7 +4,7 @@ GlyphsMCP — MCP Bridge Plugin for GlyphsApp
 
 This is the main plugin file. It:
 - Starts/stops the HTTP server on plugin lifecycle
-- Adds a top-level GlyphsMCP menu to the menu bar
+- Adds a GlyphsMCP submenu under the Window menu
 - Sets up the NSTimer-based bridge for thread-safe Glyphs API access
 
 See ARCHITECTURE.md §3 for the full design.
@@ -26,7 +26,7 @@ PREF_PORT = "com.glyphsmcp.port"
 PREF_AUTOSTART = "com.glyphsmcp.autostart"
 PREF_ALLOW_EXECUTE = "com.glyphsmcp.allowExecute"
 
-DOCS_URL = "https://github.com/nmassi/glyphs-mcp"
+DOCS_URL = "https://github.com/glyphsapp-mcp/glyphsapp-mcp"
 
 
 def _discover_repo_path():
@@ -104,8 +104,8 @@ class GlyphsMCP(GeneralPlugin):
 		)
 		self._docs_item.setTarget_(self)
 
-		# Assemble main menu
-		submenu = NSMenu.alloc().initWithTitle_("MCP")
+		# Assemble submenu
+		submenu = NSMenu.alloc().initWithTitle_("GlyphsMCP")
 		submenu.addItem_(self._server_item)
 		submenu.addItem_(NSMenuItem.separatorItem())
 		submenu.addItem_(self._connect_parent)
@@ -115,11 +115,14 @@ class GlyphsMCP(GeneralPlugin):
 		submenu.addItem_(self._execute_item)
 
 		parentItem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-			"MCP", None, ""
+			"GlyphsMCP", None, ""
 		)
 		parentItem.setSubmenu_(submenu)
 		self._menu_item = parentItem
-		NSApp.mainMenu().addItem_(parentItem)
+
+		# Add under Window menu (WINDOW_MENU is locale-independent)
+		Glyphs.menu[WINDOW_MENU].append(NSMenuItem.separatorItem())
+		Glyphs.menu[WINDOW_MENU].append(parentItem)
 
 		# Auto-start if enabled
 		if Glyphs.defaults[PREF_AUTOSTART]:
@@ -236,7 +239,10 @@ class GlyphsMCP(GeneralPlugin):
 	def __del__(self):
 		self.stopServer()
 		if hasattr(self, '_menu_item') and self._menu_item:
-			NSApp.mainMenu().removeItem_(self._menu_item)
+			try:
+				Glyphs.menu[WINDOW_MENU].submenu().removeItem_(self._menu_item)
+			except Exception:
+				pass
 
 	@objc.python_method
 	def __file__(self):
