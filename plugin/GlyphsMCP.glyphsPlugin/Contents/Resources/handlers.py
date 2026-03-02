@@ -4190,6 +4190,49 @@ def handle_check_compatibility(bridge, body=None, **kwargs):
 
 # ── POST /api/font/kerning/analyze ────────────────────────────────────────────
 
+# Critical kern pairs that should have kerning (from Cheng "Designing Type" §8)
+# Each pair string = left+right glyph names
+_CRITICAL_KERN_PAIRS = {
+	"uc_uc": [
+		"AV", "AW", "AT", "AY", "AC", "AG", "AO", "AQ",
+		"FA", "FO",
+		"LT", "LV", "LY",
+		"OA",
+		"PA",
+		"TA", "TO",
+		"VA", "VO",
+		"WA", "WO",
+		"YA", "YO",
+	],
+	"uc_lc": [
+		"Av", "Aw", "Ay",
+		"Fa", "Fe", "Fi", "Fo", "Fr", "Fu", "Fy",
+		"He", "Ho", "Hu", "Hy",
+		"Ke", "Ko", "Ku", "Kv", "Kw", "Ky",
+		"Pa", "Pe", "Po",
+		"Ta", "Te", "Ti", "To", "Tr", "Tu", "Tw", "Ty",
+		"Va", "Ve", "Vi", "Vo", "Vu", "Vy",
+		"Wa", "We", "Wi", "Wo", "Wu", "Wy",
+		"Xa", "Xe", "Xo",
+		"Ya", "Ye", "Yi", "Yo", "Yu", "Yv",
+	],
+	"lc_lc": [
+		"av", "aw", "ay",
+		"ev", "ew", "ey",
+		"fa", "fe", "fi", "fl", "fo",
+		"ov", "ow", "ox", "oy",
+		"rv", "ry",
+		"va", "vb", "vc", "vd", "ve", "vg", "vo",
+		"wa", "wd", "we", "wg", "wo",
+		"xa", "xe", "xo",
+		"ya", "yc", "yd", "ye", "yo",
+	],
+}
+
+# Exception ratio threshold — above this, sidebearings may need rework
+_KERN_EXCEPTION_RATIO_WARN = 0.40  # 40%
+
+
 def _resolve_kern_key(key, glyph_id_map):
 	"""Resolve a kerning key to a human-readable name.
 
@@ -4403,6 +4446,100 @@ def handle_analyze_kerning(bridge, body=None, **kwargs):
 			elif not has_right:
 				orphans["missingRight"].append(gname)
 
+		# ── Critical pair coverage check ──
+		# Check if essential kern pairs exist (directly or via groups)
+		missing_critical = {"uc_uc": [], "uc_lc": [], "lc_lc": []}
+		# Build effective kerning lookup for first master
+		first_mid = master_ids[0]
+		first_kerning = font.kerning.get(first_mid, {})
+
+		# Build glyph→group map
+		glyph_left_group = {}  # glyph_name → @MMK_L_...
+		glyph_right_group = {}  # glyph_name → @MMK_R_...
+		for g in font.glyphs:
+			if g.leftKerningGroup:
+				glyph_left_group[str(g.name)] = "@MMK_L_" + str(g.leftKerningGroup)
+			if g.rightKerningGroup:
+				glyph_right_group[str(g.name)] = "@MMK_R_" + str(g.rightKerningGroup)
+
+		# Build glyph_name → glyph_id map
+		glyph_name_to_id = {}
+		for g in font.glyphs:
+			glyph_name_to_id[str(g.name)] = str(g.id)
+
+		def _has_kerning(left_name, right_name):
+			"""Check if a kern pair exists (glyph-level or group-level)."""
+			# Try glyph-level (by ID)
+			left_id = glyph_name_to_id.get(left_name)
+			right_id = glyph_name_to_id.get(right_name)
+			if left_id and right_id:
+				if left_id in first_kerning and right_id in first_kerning[left_id]:
+					return True
+
+			# Try group-level
+			left_grp = glyph_left_group.get(left_name)
+			right_grp = glyph_right_group.get(right_name)
+			if left_grp and right_grp:
+				if left_grp in first_kerning and right_grp in first_kerning[left_grp]:
+					return True
+
+			# Try mixed: glyph-left + group-right, group-left + glyph-right
+			if left_id and right_grp:
+				if left_id in first_kerning and right_grp in first_kerning[left_id]:
+					return True
+			if left_grp and right_id:
+				if left_grp in first_kerning and right_id in first_kerning[left_grp]:
+					return True
+
+			return False
+
+		total_critical = 0
+		total_critical_present = 0
+		for category, pairs in _CRITICAL_KERN_PAIRS.items():
+			for pair_str in pairs:
+				left_name = pair_str[0]
+				right_name = pair_str[1:]
+				# Handle multi-char left names (all are single char in our data)
+				if len(pair_str) >= 2:
+					left_name = pair_str[0]
+					right_name = pair_str[1:]
+
+				# Skip if glyphs don't exist
+				if not font.glyphs[left_name] or not font.glyphs[right_name]:
+					continue
+
+				total_critical += 1
+				if _has_kerning(left_name, right_name):
+					total_critical_present += 1
+				else:
+					missing_critical[category].append(pair_str)
+
+		critical_coverage = {
+			"totalChecked": total_critical,
+			"present": total_critical_present,
+			"missing": total_critical - total_critical_present,
+			"coveragePct": round(total_critical_present / total_critical * 100, 1) if total_critical > 0 else 0,
+			"missingPairs": missing_critical,
+		}
+
+		# ── Exception ratio check ──
+		exception_warnings = []
+		for mname in master_names:
+			md = per_master.get(mname, {})
+			stats = md.get("stats", {})
+			total = stats.get("totalPairs", 0)
+			exceptions = stats.get("exceptions", 0)
+			if total > 0:
+				ratio = exceptions / total
+				if ratio > _KERN_EXCEPTION_RATIO_WARN:
+					exception_warnings.append({
+						"master": mname,
+						"exceptions": exceptions,
+						"totalPairs": total,
+						"ratioPct": round(ratio * 100, 1),
+						"message": "High exception ratio may indicate sidebearing issues",
+					})
+
 		# ── Color marking ──
 		# Collect glyphs to mark
 		glyphs_red = set()    # cross-master issues
@@ -4455,6 +4592,8 @@ def handle_analyze_kerning(bridge, body=None, **kwargs):
 			"perMaster": per_master,
 			"crossMaster": cross_master,
 			"groupOrphans": orphans,
+			"criticalCoverage": critical_coverage,
+			"exceptionWarnings": exception_warnings,
 			"colorLegend": {
 				"red (0)": "cross-master issue (missing pair or sign change)",
 				"yellow (3)": "outlier value or quality warning",
@@ -4524,8 +4663,86 @@ _SYMMETRIC_GLYPHS = [
 
 # Expected reference ratios
 _SPACING_RATIOS = {
-	"n_over_o_lsb": {"num": "n", "den": "o", "side": "LSB", "range": [1.2, 2.0], "label": "n/o LSB"},
-	"H_over_O_lsb": {"num": "H", "den": "O", "side": "LSB", "range": [1.2, 2.0], "label": "H/O LSB"},
+	"n_over_o_lsb": {"num": "n", "den": "o", "side": "LSB", "range": [1.2, 2.0], "optimal": [1.4, 1.6], "label": "n/o LSB"},
+	"H_over_O_lsb": {"num": "H", "den": "O", "side": "LSB", "range": [1.2, 2.0], "optimal": [1.4, 1.6], "label": "H/O LSB"},
+}
+
+# ── Tracy/Smith per-glyph sidebearing rules (Cheng "Designing Type" §4.3) ────
+# Sources: "n_lsb", "n_rsb", "o_lsb", "o_rsb", "H_lsb", "H_rsb", "O_lsb", "O_rsb"
+#   "_less" = slightly less than ref, "_more" = slightly more, "_half" = ~half of ref
+#   "minimum" = should be the tightest sidebearing in its case
+#   None = visual/irregular, skip check
+# Tolerance is % of reference value
+_SB_RULES = {
+	# ── Lowercase ──
+	# Straight-sided (stems)
+	"h": {"lsb": ("n_lsb", 5), "rsb": ("n_rsb", 10)},
+	"i": {"lsb": ("n_lsb_more", 20), "rsb": ("n_rsb", 15)},
+	"j": {"lsb": ("n_lsb", 10), "rsb": ("n_rsb", 15)},
+	"k": {"lsb": ("n_lsb_more", 15), "rsb": ("minimum", 0)},
+	"l": {"lsb": ("n_lsb_more", 15), "rsb": ("n_rsb", 15)},
+	"m": {"lsb": ("n_lsb", 5), "rsb": ("n_rsb", 10)},
+	"r": {"lsb": ("n_lsb", 5), "rsb": ("minimum", 0)},
+	"u": {"lsb": ("n_rsb", 15), "rsb": ("n_rsb", 10)},
+	# Round-sided
+	"b": {"lsb": ("n_lsb_more", 15), "rsb": ("o_rsb", 10)},
+	"c": {"lsb": ("o_lsb", 10), "rsb": None},
+	"d": {"lsb": ("o_lsb", 10), "rsb": ("n_rsb", 10)},
+	"e": {"lsb": ("o_lsb", 10), "rsb": None},
+	"g": {"lsb": ("o_lsb", 15), "rsb": None},
+	"p": {"lsb": ("n_lsb_more", 15), "rsb": ("o_rsb", 10)},
+	"q": {"lsb": ("o_lsb", 10), "rsb": ("n_rsb", 10)},
+	# Diagonal (minimum space)
+	"v": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"w": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"x": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"y": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	# Irregular (visual only — skip)
+	# a, f, g, s, t, z: no formula
+
+	# ── Uppercase ──
+	# Straight-sided (heavy verticals)
+	"B": {"lsb": ("H_lsb", 5), "rsb": None},
+	"D": {"lsb": ("H_lsb", 5), "rsb": ("O_rsb", 15)},
+	"E": {"lsb": ("H_lsb", 5), "rsb": None},
+	"F": {"lsb": ("H_lsb", 5), "rsb": None},
+	"I": {"lsb": ("H_lsb", 10), "rsb": ("H_rsb", 10)},
+	"K": {"lsb": ("H_lsb", 5), "rsb": ("minimum", 0)},
+	"L": {"lsb": ("H_lsb", 5), "rsb": ("minimum", 0)},
+	"P": {"lsb": ("H_lsb", 5), "rsb": None},
+	"R": {"lsb": ("H_lsb", 5), "rsb": None},
+	# Straight-sided (light verticals — slightly less than H)
+	"M": {"lsb": ("H_lsb_less", 15), "rsb": ("H_rsb_less", 15)},
+	"N": {"lsb": ("H_lsb_less", 15), "rsb": ("H_rsb_less", 15)},
+	# Round-sided
+	"C": {"lsb": ("O_lsb", 10), "rsb": None},
+	"G": {"lsb": ("O_lsb", 10), "rsb": None},
+	"Q": {"lsb": ("O_lsb", 10), "rsb": ("O_rsb", 10)},
+	# Straight + round mix
+	"J": {"lsb": ("minimum", 0), "rsb": ("H_rsb", 20)},
+	"U": {"lsb": ("H_lsb", 10), "rsb": ("H_rsb", 10)},
+	# Diagonal/open (minimum space)
+	"A": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"T": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"V": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"W": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"X": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	"Y": {"lsb": ("minimum", 0), "rsb": ("minimum", 0)},
+	# Central spine (half of H)
+	"S": {"lsb": ("H_half", 25), "rsb": ("H_half", 25)},
+	"Z": {"lsb": ("H_half", 25), "rsb": ("H_half", 25)},
+}
+
+# Side type classification for ordering check (straight > round > diagonal)
+_SIDE_TYPE_LC = {
+	"straight": ["h", "i", "k", "l", "m", "n", "r", "u"],
+	"round": ["b", "c", "d", "e", "g", "o", "p", "q"],
+	"diagonal": ["v", "w", "x", "y"],
+}
+_SIDE_TYPE_UC = {
+	"straight": ["B", "D", "E", "F", "H", "I", "K", "L", "M", "N", "P", "R", "U"],
+	"round": ["C", "G", "O", "Q"],
+	"diagonal": ["A", "T", "V", "W", "X", "Y"],
 }
 
 
@@ -4570,12 +4787,86 @@ def _measure_margin_areas(layer, zone_top, zone_bottom, resolution, NSPoint):
 	}
 
 
+def _measure_counter_width(layer, zone_top, zone_bottom, resolution, NSPoint):
+	"""Measure the internal counter width of a glyph using scanlines.
+
+	Returns the median counter width (distance between innermost stem walls),
+	or None if measurement fails.
+	"""
+	if zone_top <= zone_bottom or layer.width <= 0:
+		return None
+
+	width = float(layer.width)
+	counter_widths = []
+	y = zone_bottom + resolution / 2.0
+
+	while y < zone_top:
+		p1 = NSPoint(-1, y)
+		p2 = NSPoint(width + 1, y)
+		raw = layer.intersectionsBetweenPoints(p1, p2)
+		if raw:
+			xs = sorted(set(round(float(p.x), 1) for p in raw))
+			xs = [x for x in xs if -0.5 <= x <= width + 0.5]
+			if len(xs) >= 4:
+				# Counter = gap between 2nd and 3rd intersection (inner edges of stems)
+				counter = xs[2] - xs[1]
+				if counter > 5:
+					counter_widths.append(counter)
+		y += resolution
+
+	if not counter_widths:
+		return None
+
+	counter_widths.sort()
+	return round(counter_widths[len(counter_widths) // 2], 1)
+
+
+def _resolve_sb_rule(source, refs):
+	"""Resolve a sidebearing rule source to a target value.
+
+	Args:
+		source: rule string like "n_lsb", "n_lsb_more", "H_half", "minimum"
+		refs: dict of reference values {"n_lsb": 50, "n_rsb": 45, "o_lsb": 35, ...}
+
+	Returns (target_value, is_minimum) or (None, False) if unresolvable.
+	"""
+	if source == "minimum":
+		return None, True
+
+	# Parse source string
+	parts = source.split("_")
+	if len(parts) < 2:
+		return None, False
+
+	# Build base key (e.g. "n_lsb", "H_rsb", "o_lsb")
+	base_key = parts[0] + "_" + parts[1]
+	base_val = refs.get(base_key)
+	if base_val is None:
+		return None, False
+
+	# Apply modifier
+	modifier = parts[2] if len(parts) > 2 else None
+	if modifier == "less":
+		return base_val * 0.8, False
+	elif modifier == "more":
+		return base_val * 1.2, False
+	elif modifier == "half":
+		# "H_half" means source is "H_lsb" but key structure is "H_half"
+		# Rebuild: take H_lsb value and halve it
+		half_key = parts[0] + "_lsb"
+		half_val = refs.get(half_key, base_val)
+		return half_val * 0.5, False
+	else:
+		return base_val, False
+
+
 @route("POST", "/api/font/spacing/analyze")
 def handle_analyze_spacing(bridge, body=None, **kwargs):
 	"""Analyze spacing quality across masters.
 
-	Checks sidebearing group consistency, symmetry, reference ratios,
-	and cross-master spacing drift. Marks glyphs in GlyphsApp.
+	Checks: sidebearing group consistency, Tracy/Smith per-glyph rules,
+	side-type ordering, symmetry, reference ratios, counter-based validation,
+	word space, and cross-master drift. Marks glyphs in GlyphsApp.
 	"""
 	master_id = (body or {}).get("masterId", "")
 	glyph_names = (body or {}).get("glyphNames", None)
@@ -4593,6 +4884,7 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 
 		master_ids = [str(m.id) for m in masters]
 		master_names = [str(m.name) for m in masters]
+		upm = int(font.upm)
 
 		# Determine glyphs to analyze
 		if glyph_names:
@@ -4603,7 +4895,6 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 		resolution = 5  # 5u scanline resolution
 
 		per_master = {}
-		# {master_name: {glyph_name: {lsb, rsb, width, leftArea, rightArea}}}
 		all_measurements = {}
 
 		for mid, mname in zip(master_ids, master_names):
@@ -4616,7 +4907,6 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 				gname = str(glyph.name)
 				layer = glyph.layers[mid]
 				if not layer or not layer.paths:
-					# Try with components
 					if layer and layer.components:
 						clean = layer.copyDecomposedLayer()
 						clean.removeOverlap()
@@ -4626,7 +4916,6 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 					clean = layer.copyDecomposedLayer()
 					clean.removeOverlap()
 
-				# Determine zone
 				cls = _classify_glyph(glyph)
 				if cls == "lowercase":
 					zone_top = x_height
@@ -4643,7 +4932,14 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 
 			all_measurements[mname] = measurements
 
-			# ── Group consistency checks ──
+			# ── Build reference values for Tracy/Smith rules ──
+			refs = {}
+			for ref_name, side_key in [("n", "lsb"), ("n", "rsb"), ("o", "lsb"), ("o", "rsb"),
+										("H", "lsb"), ("H", "rsb"), ("O", "lsb"), ("O", "rsb")]:
+				if ref_name in measurements:
+					refs[ref_name + "_" + side_key] = measurements[ref_name][side_key]
+
+			# ── Group consistency checks (existing) ──
 			group_issues = []
 			for gid, ginfo in _SB_GROUPS.items():
 				side = ginfo["side"]
@@ -4671,6 +4967,88 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 							"group": gid,
 							"ref": ginfo["ref"],
 						})
+
+			# ── Tracy/Smith per-glyph rule checks ──
+			rule_issues = []
+			for gname, rules in _SB_RULES.items():
+				if gname not in measurements:
+					continue
+				meas = measurements[gname]
+				for side_key, rule in [("lsb", rules.get("lsb")), ("rsb", rules.get("rsb"))]:
+					if rule is None:
+						continue
+					source, tol_pct = rule
+					target, is_minimum = _resolve_sb_rule(source, refs)
+					actual = meas[side_key]
+
+					if is_minimum:
+						# "minimum" — check it's smaller than round SBs and straight SBs
+						# We just flag if it's larger than any round glyph's same-side SB
+						cls = _classify_glyph(font.glyphs[gname]) if font.glyphs[gname] else None
+						if cls == "lowercase":
+							round_ref = refs.get("o_" + side_key)
+						else:
+							round_ref = refs.get("O_" + side_key)
+						if round_ref is not None and actual > round_ref * 1.1:
+							rule_issues.append({
+								"glyph": gname,
+								"side": side_key.upper(),
+								"value": round(actual, 1),
+								"expected": "< " + str(round(round_ref, 1)) + " (minimum/diagonal)",
+								"source": source,
+								"severity": "warning",
+							})
+					elif target is not None:
+						abs_tol = max(5, abs(target) * tol_pct / 100.0)
+						dev = actual - target
+						if abs(dev) > abs_tol:
+							rule_issues.append({
+								"glyph": gname,
+								"side": side_key.upper(),
+								"value": round(actual, 1),
+								"expected": round(target, 1),
+								"deviation": round(dev, 1),
+								"source": source,
+								"severity": "inconsistent" if abs(dev) > abs_tol * 2 else "warning",
+							})
+
+			# ── Side-type ordering check ──
+			ordering_issues = []
+			for case_label, side_types in [("lowercase", _SIDE_TYPE_LC), ("uppercase", _SIDE_TYPE_UC)]:
+				for side_key in ("lsb", "rsb"):
+					type_avgs = {}
+					for stype, members in side_types.items():
+						vals = [measurements[g][side_key] for g in members if g in measurements]
+						if vals:
+							type_avgs[stype] = sum(vals) / len(vals)
+
+					if "straight" in type_avgs and "round" in type_avgs:
+						if type_avgs["straight"] < type_avgs["round"] * 0.9:
+							ordering_issues.append({
+								"case": case_label,
+								"side": side_key.upper(),
+								"issue": "straight < round",
+								"straightAvg": round(type_avgs["straight"], 1),
+								"roundAvg": round(type_avgs["round"], 1),
+							})
+					if "round" in type_avgs and "diagonal" in type_avgs:
+						if type_avgs["round"] < type_avgs["diagonal"] * 0.9:
+							ordering_issues.append({
+								"case": case_label,
+								"side": side_key.upper(),
+								"issue": "round < diagonal",
+								"roundAvg": round(type_avgs["round"], 1),
+								"diagonalAvg": round(type_avgs["diagonal"], 1),
+							})
+					if "straight" in type_avgs and "diagonal" in type_avgs:
+						if type_avgs["straight"] < type_avgs["diagonal"] * 0.9:
+							ordering_issues.append({
+								"case": case_label,
+								"side": side_key.upper(),
+								"issue": "straight < diagonal",
+								"straightAvg": round(type_avgs["straight"], 1),
+								"diagonalAvg": round(type_avgs["diagonal"], 1),
+							})
 
 			# ── Symmetry checks ──
 			symmetry_issues = []
@@ -4702,7 +5080,13 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 					continue
 				ratio = round(num_val / den_val, 2)
 				lo, hi = rinfo["range"]
-				verdict = "pass" if lo <= ratio <= hi else "warning"
+				opt_lo, opt_hi = rinfo.get("optimal", rinfo["range"])
+				if opt_lo <= ratio <= opt_hi:
+					verdict = "pass"
+				elif lo <= ratio <= hi:
+					verdict = "acceptable"
+				else:
+					verdict = "warning"
 				ratios.append({
 					"label": rinfo["label"],
 					"numGlyph": num_name,
@@ -4711,17 +5095,81 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 					"denValue": den_val,
 					"ratio": ratio,
 					"expectedRange": rinfo["range"],
+					"optimalRange": rinfo.get("optimal", rinfo["range"]),
 					"verdict": verdict,
 				})
+
+			# ── Counter-based validation ──
+			counter_checks = []
+			for ref_name in ("n", "H"):
+				if ref_name not in measurements:
+					continue
+				glyph = font.glyphs[ref_name]
+				if not glyph:
+					continue
+				layer = glyph.layers[mid]
+				if not layer:
+					continue
+				clean = layer.copyDecomposedLayer()
+				clean.removeOverlap()
+				cls = _classify_glyph(glyph)
+				zt = x_height if cls == "lowercase" else cap_height
+				counter = _measure_counter_width(clean, zt, 0, resolution, NSPoint)
+				if counter and counter > 0:
+					lsb = measurements[ref_name]["lsb"]
+					ratio_pct = round(lsb / counter * 100, 1) if counter > 0 else 0
+					# Guide: LSB should be 25–50% of counter width
+					verdict = "pass" if 20 <= ratio_pct <= 55 else "warning"
+					counter_checks.append({
+						"glyph": ref_name,
+						"counter": counter,
+						"lsb": lsb,
+						"ratioPct": ratio_pct,
+						"expectedRange": "25–50%",
+						"verdict": verdict,
+					})
+
+			# ── Word space check ──
+			word_space = None
+			space_glyph = font.glyphs["space"]
+			if space_glyph:
+				space_layer = space_glyph.layers[mid]
+				if space_layer:
+					space_w = float(space_layer.width)
+					quarter_em = upm / 4.0
+					fifth_em = upm / 5.0
+					half_em = upm / 2.0
+					i_width = None
+					if "i" in measurements:
+						i_width = measurements["i"]["width"]
+
+					if fifth_em <= space_w <= half_em:
+						verdict = "pass"
+					else:
+						verdict = "warning"
+
+					word_space = {
+						"width": round(space_w, 1),
+						"quarterEm": round(quarter_em, 1),
+						"iWidth": round(i_width, 1) if i_width else None,
+						"ratioPctEm": round(space_w / upm * 100, 1),
+						"verdict": verdict,
+					}
 
 			per_master[mname] = {
 				"masterId": mid,
 				"glyphCount": len(measurements),
 				"groupIssues": group_issues,
 				"groupIssueCount": len(group_issues),
+				"ruleIssues": rule_issues,
+				"ruleIssueCount": len(rule_issues),
+				"orderingIssues": ordering_issues,
+				"orderingIssueCount": len(ordering_issues),
 				"symmetryIssues": symmetry_issues,
 				"symmetryIssueCount": len(symmetry_issues),
 				"ratios": ratios,
+				"counterChecks": counter_checks,
+				"wordSpace": word_space,
 			}
 
 		# ── Cross-master spacing drift ──
@@ -4731,8 +5179,6 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 			ref_data = all_measurements.get(ref_mname, {})
 			for mname in master_names[1:]:
 				other_data = all_measurements.get(mname, {})
-				# Check if spacing relationships change
-				# For each glyph in both masters, compare LSB/RSB ratios relative to reference (n or H)
 				for glyph in check_glyphs:
 					gname = str(glyph.name)
 					if gname not in ref_data or gname not in other_data:
@@ -4757,7 +5203,7 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 						other_ratio = other_glyph_val / other_ref_val
 						ratio_diff = abs(ref_ratio - other_ratio)
 
-						if ratio_diff > 0.25:  # >25% ratio change across masters
+						if ratio_diff > 0.25:
 							cross_master_drift.append({
 								"glyph": gname,
 								"side": side_key.upper(),
@@ -4779,11 +5225,21 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 					glyphs_red.add(gi["glyph"])
 				else:
 					glyphs_yellow.add(gi["glyph"])
+			for ri in mdata["ruleIssues"]:
+				if ri.get("severity") == "inconsistent":
+					glyphs_red.add(ri["glyph"])
+				else:
+					glyphs_yellow.add(ri["glyph"])
+			for oi in mdata["orderingIssues"]:
+				glyphs_yellow.add("*")  # structural issue, not per-glyph
 			for si in mdata["symmetryIssues"]:
 				glyphs_yellow.add(si["glyph"])
 
 		for d in cross_master_drift:
 			glyphs_red.add(d["glyph"])
+
+		glyphs_red.discard("*")
+		glyphs_yellow.discard("*")
 
 		for gname in glyphs_red:
 			g = font.glyphs[gname]
@@ -4797,7 +5253,6 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 				g.beginUndo()
 				g.color = 3
 				g.endUndo()
-		# Mark passing glyphs green
 		all_flagged = glyphs_red | glyphs_yellow
 		for glyph in check_glyphs:
 			gname = str(glyph.name)
@@ -4810,13 +5265,142 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 			"ok": True,
 			"masterCount": len(masters),
 			"masters": master_names,
+			"upm": upm,
 			"perMaster": per_master,
 			"crossMasterDrift": cross_master_drift[:50],
 			"crossMasterDriftCount": len(cross_master_drift),
 			"colorLegend": {
 				"red (0)": "significant spacing inconsistency",
-				"yellow (3)": "minor deviation or asymmetry",
+				"yellow (3)": "minor deviation, ordering issue, or asymmetry",
 				"light green (4)": "passed",
+			},
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
+	return 200, result
+
+
+# ── GET /api/font/glyphs/<name>/spacing-strings ──────────────────────────────
+
+# Ruder test words (hard combinations with diagonals/open forms)
+_RUDER_WORDS = {
+	"hard": [
+		"vertrag", "crainte", "screw", "fratricide", "instruction",
+		"zwetschge", "waverly", "yachting", "kayak", "affixed",
+	],
+	"easy": [
+		"bibel", "malhabile", "modo", "blind", "china",
+		"schaden", "minimum", "illuminate", "million", "hidden",
+	],
+}
+
+# Single-stem stress test words (from guide §6)
+_SINGLE_STEM_WORDS = [
+	"millennial", "initial", "minimum", "illuminator", "illicit",
+	"titular", "militant", "trivial", "filial", "utilitarian",
+]
+
+
+@route("GET", "/api/font/glyphs/{glyph_name}/spacing-strings")
+def handle_spacing_strings(bridge, glyph_name=None, **kwargs):
+	"""Generate spacing test strings for a glyph.
+
+	Returns canonical test strings for visual spacing evaluation:
+	- Three-at-a-time (OH no Type Co method)
+	- Systematic pairs (Jamra method)
+	- Ruder test words
+	- Single-stem stress test
+	"""
+	def _run():
+		from GlyphsApp import Glyphs
+		font = _require_font()
+
+		glyph = font.glyphs[glyph_name]
+		if not glyph:
+			return {"error": f"Glyph '{glyph_name}' not found"}
+
+		cls = _classify_glyph(glyph)
+		g = glyph_name
+
+		# Determine sandwich characters based on case
+		if cls == "lowercase":
+			straight_ref = "n"
+			round_ref = "o"
+			alphabet = "abcdefghijklmnopqrstuvwxyz"
+		else:
+			straight_ref = "H"
+			round_ref = "O"
+			alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+		s = straight_ref
+		r = round_ref
+
+		# ── Three-at-a-time (OH no Type Co) ──
+		three_at_a_time = {
+			"betweenStraight": f"{s}{s}{g}{s}{g}{s}{s}",
+			"betweenRound": f"{r}{r}{g}{r}{g}{r}{r}",
+			"mixed": f"{s}{g}{r}{g}{s}{g}{r}",
+			"reference": f"{s}{s}{s}{s}  {r}{r}{r}{r}  {s}{r}{s}{r}{s}",
+		}
+
+		# ── Systematic pairs (Jamra) — glyph vs all others in its case ──
+		systematic = ""
+		available = [c for c in alphabet if font.glyphs[c]]
+		for c in available:
+			systematic += g + c
+		systematic_pairs = systematic[:200]  # Cap length
+
+		# ── Cross-case integration ──
+		if cls == "lowercase":
+			cross_case = f"HH{g}Hnn{g}nHHn{g}{g}n"
+		else:
+			cross_case = f"HH{g}HnnHn{g}{g}nOOn{g}On"
+
+		# ── Find Ruder words containing this glyph ──
+		ruder_matches = []
+		for word in _RUDER_WORDS["hard"] + _RUDER_WORDS["easy"]:
+			if glyph_name.lower() in word:
+				ruder_matches.append(word)
+
+		# ── Single-stem stress test (for i, l, t, r, etc.) ──
+		single_stem = []
+		if glyph_name in ("i", "l", "r", "t", "I", "one"):
+			single_stem = _SINGLE_STEM_WORDS
+
+		# ── Context strings with common problematic neighbors ──
+		if cls == "lowercase":
+			context_strings = [
+				f"nn{g}nn",
+				f"oo{g}oo",
+				f"no{g}on",
+				f"nn{g}{g}nn",
+				f"oo{g}{g}oo",
+			]
+		else:
+			context_strings = [
+				f"HH{g}HH",
+				f"OO{g}OO",
+				f"HO{g}OH",
+				f"HH{g}{g}HH",
+				f"OO{g}{g}OO",
+			]
+
+		return {
+			"ok": True,
+			"glyph": glyph_name,
+			"case": cls,
+			"threeAtATime": three_at_a_time,
+			"systematicPairs": systematic_pairs,
+			"crossCase": cross_case,
+			"contextStrings": context_strings,
+			"ruderWords": ruder_matches if ruder_matches else None,
+			"singleStemStress": single_stem if single_stem else None,
+			"ruderTest": {
+				"hard": _RUDER_WORDS["hard"],
+				"easy": _RUDER_WORDS["easy"],
+				"instruction": "Set both columns side by side. If hard column looks darker, spacing is too tight.",
 			},
 		}
 
