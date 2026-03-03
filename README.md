@@ -61,6 +61,8 @@ Open a font in GlyphsApp, then ask your AI assistant:
 
 > "Make the R 20% wider and harmonize the curves"
 
+> "Analize metrics on lowercases"
+
 ## Tools
 
 ### Read
@@ -147,11 +149,11 @@ The plugin adds a **GlyphsMCP** submenu under _Window_ in the menu bar:
 
 ## Preferences
 
-| Key                          | Default | Description                      |
-| ---------------------------- | ------- | -------------------------------- |
-| `com.glyphsmcp.port`         | `7745`  | HTTP server port                 |
-| `com.glyphsmcp.autostart`    | `true`  | Start server on GlyphsApp launch |
-| `com.glyphsmcp.allowExecute` | `false` | Enable the execute endpoint      |
+| Key                                | Default | Description                      |
+| ---------------------------------- | ------- | -------------------------------- |
+| `com.nico.glyphs-mcp.port`         | `7745`  | HTTP server port                 |
+| `com.nico.glyphs-mcp.autostart`    | `true`  | Start server on GlyphsApp launch |
+| `com.nico.glyphs-mcp.allowExecute` | `false` | Enable the execute endpoint      |
 
 ## How it works
 
