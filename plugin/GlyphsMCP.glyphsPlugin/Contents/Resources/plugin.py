@@ -22,11 +22,11 @@ from bridge import MainThreadBridge
 from server import MCPHTTPServer
 
 DEFAULT_PORT = 7745
-PREF_PORT = "com.glyphsmcp.port"
-PREF_AUTOSTART = "com.glyphsmcp.autostart"
-PREF_ALLOW_EXECUTE = "com.glyphsmcp.allowExecute"
+PREF_PORT = "com.nico.glyphs-mcp.port"
+PREF_AUTOSTART = "com.nico.glyphs-mcp.autostart"
+PREF_ALLOW_EXECUTE = "com.nico.glyphs-mcp.allowExecute"
 
-DOCS_URL = "https://github.com/glyphsapp-mcp/glyphsapp-mcp"
+DOCS_URL = "https://github.com/nmassi/glyphs-mcp/blob/main/README.md"
 
 
 def _discover_repo_path():

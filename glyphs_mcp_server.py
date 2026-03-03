@@ -470,7 +470,7 @@ def execute_in_glyphs(code: str) -> dict:
     stdout is captured and returned. This is powerful but must be used carefully.
 
     NOTE: This endpoint is disabled by default. The user must enable it
-    in GlyphsApp preferences (com.glyphsmcp.allowExecute = True).
+    in GlyphsApp preferences (com.nico.glyphs-mcp.allowExecute = True).
 
     Example: execute_in_glyphs("print(Glyphs.font.familyName)")
     """

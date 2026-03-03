@@ -5951,7 +5951,7 @@ def handle_execute(bridge, body=None, **kwargs):
 	⚠️ DANGEROUS — disabled by default. Enable via preferences.
 	"""
 	from GlyphsApp import Glyphs
-	PREF_ALLOW_EXECUTE = "com.glyphsmcp.allowExecute"
+	PREF_ALLOW_EXECUTE = "com.nico.glyphs-mcp.allowExecute"
 
 	if not body or "code" not in body:
 		return 400, {"error": "Body must contain 'code'"}
@@ -5960,7 +5960,7 @@ def handle_execute(bridge, body=None, **kwargs):
 		return bool(Glyphs.defaults[PREF_ALLOW_EXECUTE])
 
 	if not bridge.execute_on_main(_check_allowed):
-		return 403, {"error": "Execute endpoint disabled. Set com.glyphsmcp.allowExecute = True in GlyphsApp preferences."}
+		return 403, {"error": "Execute endpoint disabled. Set com.nico.glyphs-mcp.allowExecute = True in GlyphsApp preferences."}
 
 	code = body["code"]
 
