@@ -17,7 +17,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Topic :: Software, MCP",
+    "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
     "mcp[cli]>=1.0.0",
