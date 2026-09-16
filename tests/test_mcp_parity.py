@@ -11,6 +11,7 @@ import glyphs_mcp_server as server
 
 ROOT = Path(__file__).resolve().parents[1]
 HANDLERS_PATH = ROOT / "plugin/GlyphsMCP.glyphsPlugin/Contents/Resources/handlers.py"
+PLUGIN_PATH = ROOT / "plugin/GlyphsMCP.glyphsPlugin/Contents/Resources/plugin.py"
 NEW_TOOLS = {
     "analyze_kerning_groups", "auto_kern", "check_font_name",
     "check_glyphset_coverage", "check_language_support", "create_recipe",
@@ -110,6 +111,16 @@ class PluginRouteTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.handlers._rmx_parameter_for_master([90, 100, 110], Master(), 1, 2)
+
+    def test_plugin_imports_objc_for_python_method_decorators(self):
+        tree = ast.parse(PLUGIN_PATH.read_text())
+        imported_names = {
+            alias.asname or alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertIn("objc", imported_names)
 
     def test_recipe_crud_and_step_parsing(self):
         with tempfile.TemporaryDirectory() as directory:

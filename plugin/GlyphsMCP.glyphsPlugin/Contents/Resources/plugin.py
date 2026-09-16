@@ -14,6 +14,7 @@ from GlyphsApp import *
 from GlyphsApp.plugins import *
 from AppKit import NSApp, NSMenu, NSMenuItem, NSPasteboard, NSWorkspace
 from Foundation import NSURL
+import objc
 import os
 import json
 
