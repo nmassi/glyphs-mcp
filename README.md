@@ -15,6 +15,7 @@ MCP Client  ←(stdio/MCP)→  MCP Server  ←(HTTP/localhost)→  GlyphsApp Plu
 - [GlyphsApp 3](https://glyphsapp.com) (tested on 3.2+)
 - An MCP client: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Cursor](https://cursor.sh), [Windsurf](https://windsurf.com), etc.
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- `glyphsets` and `shaperglot` (installed automatically with the MCP package)
 
 ## Installation
 
@@ -70,12 +71,12 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | Tool            | Description                                                              |
 | --------------- | ------------------------------------------------------------------------ |
 | `get_font_info` | Font family name, UPM, glyph count, masters, axes, metrics, instances    |
-| `list_glyphs`   | All glyph names with unicode, category, layer count                      |
+| `list_glyphs`   | Glyph metadata, optionally filtered by `category` and capped by `limit`  |
 | `get_glyph`     | Full glyph data: paths, components, anchors, sidebearings for all layers |
 | `get_glyph_svg` | Glyph rendered as SVG markup                                             |
 | `get_selection` | Current editor selection: active glyph, layer, selected paths/nodes      |
 | `get_masters`   | All masters with metrics and axis positions                              |
-| `get_kerning`   | All kerning pairs for a master                                           |
+| `get_kerning`   | Kerning pairs filtered by `master_id`/`left`, optionally capped by `limit` |
 | `get_features`  | OpenType feature code                                                    |
 
 ### Write
@@ -93,6 +94,7 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | `set_kerning_pair`    | Add or modify a kerning pair                                       |
 | `delete_kerning_pair` | Remove a kerning pair                                              |
 | `set_feature_code`    | Create or update an OpenType feature                               |
+| `generate_box_drawing`| Generate U+2500–U+259F outlines across masters; can overwrite drawings |
 
 ### Analysis
 
@@ -113,12 +115,18 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | `check_compatibility`    | Master compatibility: paths, nodes, components, anchors |
 | `analyze_kerning`        | Kerning quality: cross-master gaps, orphans, outliers   |
 | `analyze_spacing`        | Spacing quality: sidebearing groups, symmetry, drift    |
+| `analyze_kerning_groups` | Analyze or assign kerning groups, with dry-run/overwrite control |
+| `auto_kern`              | Preview or apply optical-area kerning to critical, automatic, or explicit pairs |
+| `check_glyphset_coverage`| Check Google Fonts glyphsets and optionally add missing empty glyphs |
+| `check_language_support` | Export a temporary instance and evaluate language support with Shaperglot |
+| `review_production`      | Run a 44-item production-readiness review              |
+| `check_font_name`        | Screen a proposed family name against Fontdata; not legal clearance |
 
-Analysis tools automatically mark glyphs in GlyphsApp: **red** = inconsistent, **orange** = unreliable, **yellow** = optical compensation, **green** = pass.
+Analysis tools may mark glyphs in GlyphsApp: **red** = inconsistent, **orange** = unreliable, **yellow** = warning/optical compensation, **green** = pass. `analyze_kerning`, `analyze_spacing`, `check_compatibility`, and `compare_stems` also point to matching workflow recipes for broader checks.
 
 ### RMX Tools
 
-Requires RMX Tools for full functionality. Falls back to native transforms when RMX is unavailable.
+Requires RMX Tools for full functionality. `rmx_scale` now uses real RMX processing, accepts one value or a per-master list for scale parameters, and defaults `allow_fallback=False`; native affine fallback must be explicitly enabled. `rmx_tune` delegates to the loaded RMX Tuner and supports `blend` and `all_masters`.
 
 | Tool            | Description                                         |
 | --------------- | --------------------------------------------------- |
@@ -127,6 +135,21 @@ Requires RMX Tools for full functionality. Falls back to native transforms when 
 | `rmx_tune`      | Adjust weight, width, height, or slant              |
 | `rmx_monospace` | Adjust a glyph to a fixed advance width             |
 | `rmx_batch`     | Apply any RMX filter to multiple glyphs             |
+| `smart_scale`   | Scale multiple glyphs with measured stem compensation, optional backups |
+
+### Recipes
+
+Bundled markdown recipes provide ordered workflows for consistency audits, spacing, kerning, master compatibility, proportional scaling, dated-layer cleanup, and Glyphs plugin creation.
+
+| Tool              | Description                                      |
+| ----------------- | ------------------------------------------------ |
+| `list_recipes`    | List bundled and user-created recipes            |
+| `get_recipe`      | Read a complete recipe                           |
+| `get_recipe_step` | Read one numbered step with its next-step directive |
+| `create_recipe`   | Write a recipe markdown file; overwrite is opt-in |
+| `delete_recipe`   | Permanently delete a recipe markdown file        |
+
+Recipe creation and deletion modify files in the installed plugin's `Resources/recipes` directory.
 
 ### Advanced
 
@@ -137,6 +160,8 @@ Requires RMX Tools for full functionality. Falls back to native transforms when 
 ## Multi-master support
 
 All tools accept an optional `master_id` parameter. When omitted, read/write tools use the first master. Analysis tools analyze all masters and return per-master results.
+
+Tools with side effects are explicit: kerning-group analysis can assign groups and color glyphs; auto-kern can write kerning; glyphset coverage can add empty blue-labelled glyphs; box drawing creates or replaces outlines; smart scale modifies outlines and can create backup layers; recipe CRUD writes or deletes markdown files. Use dry-run/preview options where available and save the font before bulk operations.
 
 ## Menu
 

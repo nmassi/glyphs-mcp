@@ -136,7 +136,6 @@ def handle_status(bridge, **kwargs):
 	result = bridge.execute_on_main(_get_status)
 	return 200, result
 
-
 # ── GET /api/font ─────────────────────────────────────────────────────────────
 
 @route("GET", "/api/font")
@@ -183,24 +182,38 @@ def handle_get_font(bridge, **kwargs):
 # ── GET /api/font/glyphs ──────────────────────────────────────────────────────
 
 @route("GET", "/api/font/glyphs")
-def handle_list_glyphs(bridge, **kwargs):
-	"""List all glyphs with basic metadata (no path data)."""
+def handle_list_glyphs(bridge, query=None, **kwargs):
+	"""List glyphs with basic metadata (no path data).
+
+	Query params:
+	  category  — filter by category (Letter, Number, Punctuation, Symbol, etc.)
+	  limit     — max number of glyphs to return (default: all)
+	"""
+	q = query or {}
+	cat_filter = q.get("category", [None])[0]
+	limit = q.get("limit", [None])[0]
+	limit = int(limit) if limit else None
+
 	def _list_glyphs():
 		font = _require_font()
 		glyphs = []
 		for g in font.glyphs:
+			if cat_filter and (str(g.category) if g.category else None) != cat_filter:
+				continue
 			glyphs.append({
 				"name": str(g.name),
 				"unicode": str(g.unicode) if g.unicode else None,
-				"layers": len(g.layers),
-				"script": str(g.script) if g.script else None,
 				"category": str(g.category) if g.category else None,
 				"subCategory": str(g.subCategory) if g.subCategory else None,
 			})
-		return {"glyphs": glyphs, "count": len(glyphs)}
+			if limit and len(glyphs) >= limit:
+				break
+		total = len(font.glyphs)
+		return {"glyphs": glyphs, "count": len(glyphs), "total": total}
 
 	result = bridge.execute_on_main(_list_glyphs)
 	return 200, result
+
 
 
 # ── GET /api/font/glyphs/{name} ──────────────────────────────────────────────
@@ -597,27 +610,43 @@ def handle_set_kerning(bridge, body=None, **kwargs):
 
 @route("GET", "/api/font/kerning")
 def handle_get_kerning(bridge, query=None, **kwargs):
-	"""Get kerning pairs for a master."""
-	master_id = (query or {}).get("master", [None])[0]
+	"""Get kerning pairs for a master.
+
+	Query params:
+	  master — master ID (default: first master)
+	  left   — filter by left glyph/group name
+	  limit  — max number of pairs to return (default: all)
+	"""
+	q = query or {}
+	master_id = q.get("master", [None])[0]
+	left_filter = q.get("left", [None])[0]
+	limit = q.get("limit", [None])[0]
+	limit = int(limit) if limit else None
 
 	def _get_kerning():
 		font = _require_font()
 		mid = master_id or str(font.masters[0].id)
 		kerning = font.kerning.get(mid, {})
 
+		total = sum(len(rights) for rights in kerning.values())
 		pairs = []
 		for left_key, rights in kerning.items():
+			if left_filter and str(left_key) != left_filter:
+				continue
 			for right_key, value in rights.items():
 				pairs.append({
 					"left": str(left_key),
 					"right": str(right_key),
 					"value": float(value)
 				})
+				if limit and len(pairs) >= limit:
+					return {"masterId": mid, "pairs": pairs, "count": len(pairs), "total": total}
 
-		return {"masterId": mid, "pairs": pairs, "count": len(pairs)}
+		return {"masterId": mid, "pairs": pairs, "count": len(pairs), "total": total}
 
 	result = bridge.execute_on_main(_get_kerning)
 	return 200, result
+
 
 
 # ── GET /api/font/features ───────────────────────────────────────────────────
@@ -2715,6 +2744,24 @@ def _get_rmx_filter_instance(class_name):
 	return None
 
 
+def _rmx_parameter_for_master(value, master, index, masters_count):
+	"""Resolve a scalar, per-master sequence, or master-keyed RMX parameter."""
+	if isinstance(value, (list, tuple)):
+		if len(value) == 1:
+			return value[0]
+		if len(value) != masters_count:
+			raise ValueError(
+				f"RMX parameter has {len(value)} values for {masters_count} masters"
+			)
+		return value[index]
+	if isinstance(value, dict):
+		for key in (str(master.id), str(master.name), str(index), "default"):
+			if key in value:
+				return value[key]
+		raise ValueError(f"RMX parameter has no value for master '{master.name}'")
+	return value
+
+
 def _rmx_process(filter_cls_name, font, glyph, master_id, params):
 	"""
 	Drive an RMX filter via its dialog code path (headless).
@@ -2760,7 +2807,10 @@ def _rmx_process(filter_cls_name, font, glyph, master_id, params):
 	hybrids = NSMutableArray.alloc().init()
 	for m in masters:
 		layer = glyph.layers[m.id]
-		h = RMXHybridGlyph.alloc().initWithGSLayer_(layer)
+		if hasattr(RMXHybridGlyph, "initWithGSLayer_gsglyph_"):
+			h = RMXHybridGlyph.alloc().initWithGSLayer_gsglyph_(layer, glyph)
+		else:
+			h = RMXHybridGlyph.alloc().initWithGSLayer_(layer)
 		h.create_RMXglyph()
 		hybrids.addObject_(h)
 
@@ -2797,8 +2847,9 @@ def _rmx_process(filter_cls_name, font, glyph, master_id, params):
 
 	# ── 4. Set parameters for all masters ────────────────────────────────────
 	for param_name, value in params.items():
-		for i in range(n):
-			filt.updateValue_forParameter_forMaster_(value, param_name, i)
+		for i, master in enumerate(masters):
+			master_value = _rmx_parameter_for_master(value, master, i, n)
+			filt.updateValue_forParameter_forMaster_(master_value, param_name, i)
 
 	# ── 5. Snapshot layers before RMX (for undo) ────────────────────────────
 	# confirmDialog_() requires disableUndoRegistration() beforehand (its
@@ -5466,7 +5517,11 @@ def handle_rmx_harmonize(bridge, body=None, **kwargs):
 
 @route("POST", "/api/filters/rmx/tune")
 def handle_rmx_tune(bridge, body=None, **kwargs):
-	"""Apply RMX Tuner to a glyph layer."""
+	"""Apply the real RMX Tuner to a glyph layer or master layers.
+
+	This intentionally delegates to the installed/licensed RMXTuner instance in
+	Glyphs.filters. It does not approximate RMX with native interpolation.
+	"""
 	if not body or "glyphName" not in body:
 		return 400, {"error": "Body must contain 'glyphName'"}
 
@@ -5475,253 +5530,192 @@ def handle_rmx_tune(bridge, body=None, **kwargs):
 	width = body.get("width", 0)
 	height = body.get("height", 0)
 	slant = body.get("slant", 0)
+	blend = body.get("blend", 0)
 	fixed_width = body.get("fixedWidth", False)
 	master_id = body.get("masterId", None)
+	all_masters = bool(body.get("allMasters", False))
+	preserve_defaults = bool(body.get("preserveDefaults", True))
 
 	def _tune():
-		import math
-		from Foundation import NSAffineTransform, NSPoint
-		from GlyphsApp import GSPath, GSNode
+		from GlyphsApp import Glyphs
+		from Foundation import NSMutableArray, NSNumber, NSUserDefaults
+		from AppKit import NSButton
+		try:
+			from AppKit import NSOnState, NSOffState
+		except Exception:
+			NSOnState = 1
+			NSOffState = 0
 
 		font = _require_font()
-		masters = list(font.masters)
-		if len(masters) < 2:
-			return 400, {"error": "Tuner requires at least 2 masters"}
-
-		# Determine which master to modify
-		active_idx = 0
-		if master_id:
-			for i, m in enumerate(masters):
-				if m.id == master_id:
-					active_idx = i
-					break
-		target_master = masters[active_idx]
-
 		glyph = font.glyphs[glyph_name]
 		if glyph is None:
 			raise KeyError(f"Glyph '{glyph_name}' not found")
-		target_layer = glyph.layers[target_master.id]
-		width_before = float(target_layer.width)
-		lsb_before = float(target_layer.LSB)
-		rsb_before = float(target_layer.RSB)
 
-		# Find the weight axis range across masters
-		axis_name = "Weight"
-		axis_values = []
-		for m in masters:
-			for ax in font.axes:
-				if ax.name == axis_name:
-					axis_values.append(float(m.axes[font.axes.index(ax)]))
-					break
-		if len(axis_values) < 2:
-			return 400, {"error": "No Weight axis found with 2+ masters"}
+		def _find_tuner():
+			filters = getattr(Glyphs, "filters", None)
+			if filters is None:
+				raise RuntimeError("Glyphs.filters is not available; RMX may not be loaded")
+			for candidate in filters:
+				if type(candidate).__name__ == "RMXTuner":
+					return candidate
+				try:
+					title = candidate.title()
+				except Exception:
+					title = None
+				if title and "RMX" in str(title) and "Tuner" in str(title):
+					return candidate
+			raise RuntimeError(
+				"RMXTuner was not found in Glyphs.filters. "
+				"Install/load RMX Tools and restart Glyphs."
+			)
 
-		axis_range = max(axis_values) - min(axis_values)
-		if axis_range == 0:
-			return 400, {"error": "Weight axis range is zero"}
+		def _default_controller():
+			for attr in ("currentTab", "fontView"):
+				try:
+					controller = getattr(font, attr)
+				except Exception:
+					controller = None
+				if controller is not None:
+					return controller
+			try:
+				controllers = font.parent.windowControllers()
+				if controllers and len(controllers):
+					return controllers[0]
+			except Exception:
+				pass
+			return None
 
-		# Find the "other" master to interpolate toward/away from
-		current_axis_val = axis_values[active_idx]
-		other_idx = 0
-		max_dist = 0
-		for i, v in enumerate(axis_values):
-			if i != active_idx and abs(v - current_axis_val) > max_dist:
-				max_dist = abs(v - current_axis_val)
-				other_idx = i
-		other_layer = glyph.layers[masters[other_idx].id]
-		sign = 1 if axis_values[other_idx] > current_axis_val else -1
+		def _checkbox(enabled):
+			button = NSButton.alloc().init()
+			button.setState_(NSOnState if bool(enabled) else NSOffState)
+			return button
 
-		# ── Helper: decompose displacement into tangential/normal ────
-		def _decomposed_pos(tx, ty, dx, dy, factor, nodes_t, j, nn,
-		                    mode="normal"):
-			"""Move a node by factor along one component of the displacement.
+		def _summary(layer):
+			bounds = layer.bounds
+			return {
+				"width": round(float(layer.width), 3),
+				"lsb": round(float(layer.LSB), 3) if layer.LSB is not None else None,
+				"rsb": round(float(layer.RSB), 3) if layer.RSB is not None else None,
+				"bounds": {
+					"x": round(float(bounds.origin.x), 3),
+					"y": round(float(bounds.origin.y), 3),
+					"width": round(float(bounds.size.width), 3),
+					"height": round(float(bounds.size.height), 3),
+				},
+				"pathCount": len(layer.paths),
+				"componentCount": len(layer.components),
+			}
 
-			mode="normal"     → apply only the normal component (perpendicular
-			                    to contour = changes stroke weight). Use for
-			                    weight adjustments.
-			mode="tangential" → apply only the tangential component (along
-			                    contour = changes proportions). Use for
-			                    width/height scaling with stroke preservation.
+		def _changed(before, after):
+			return before != after
 
-			For corner nodes, picks incoming or outgoing tangent based on
-			which gives the largest normal component of the displacement.
-			"""
-			if abs(dx) < 0.01 and abs(dy) < 0.01:
-				return tx, ty
+		def _save_defaults(defaults):
+			keys = ("GSRMX_preview", "GSRMX_fixedWidth")
+			return {key: defaults.objectForKey_(key) for key in keys}
 
-			prev_n = nodes_t[(j - 1) % nn]
-			next_n = nodes_t[(j + 1) % nn]
-			ppx = float(prev_n.position.x)
-			ppy = float(prev_n.position.y)
-			nnx = float(next_n.position.x)
-			nny = float(next_n.position.y)
+		def _restore_defaults(defaults, saved):
+			for key, value in saved.items():
+				if value is None:
+					defaults.removeObjectForKey_(key)
+				else:
+					defaults.setObject_forKey_(value, key)
+			try:
+				defaults.synchronize()
+			except Exception:
+				pass
 
-			in_dx, in_dy = tx - ppx, ty - ppy
-			in_len = math.sqrt(in_dx**2 + in_dy**2) or 1
-			in_tx, in_ty = in_dx / in_len, in_dy / in_len
+		if all_masters:
+			layers = [glyph.layers[m.id] for m in font.masters if glyph.layers[m.id] is not None]
+		else:
+			target_master_id = master_id or font.masters[0].id
+			layer = glyph.layers[target_master_id]
+			if layer is None:
+				raise KeyError(f"Layer/master '{target_master_id}' not found for glyph '{glyph_name}'")
+			layers = [layer]
 
-			out_dx, out_dy = nnx - tx, nny - ty
-			out_len = math.sqrt(out_dx**2 + out_dy**2) or 1
-			out_tx, out_ty = out_dx / out_len, out_dy / out_len
+		if not layers:
+			raise RuntimeError(f"No layers to tune for glyph '{glyph_name}'")
 
-			in_norm = abs(dx * (-in_ty) + dy * in_tx)
-			out_norm = abs(dx * (-out_ty) + dy * out_tx)
+		tuner = _find_tuner()
+		controller = _default_controller()
+		if controller is None:
+			raise RuntimeError("Could not resolve a Glyphs controller for RMXTuner")
 
-			if in_norm >= out_norm:
-				tng_x, tng_y = in_tx, in_ty
-			else:
-				tng_x, tng_y = out_tx, out_ty
+		before = {str(layer.layerId): _summary(layer) for layer in layers}
+		defaults = NSUserDefaults.standardUserDefaults()
+		saved_defaults = _save_defaults(defaults) if preserve_defaults else None
+		warnings = []
 
-			# Normal vector (perpendicular to tangent)
-			nrm_x, nrm_y = -tng_y, tng_x
-
-			if mode == "tangential":
-				# Project displacement onto tangent direction
-				d_tang = dx * tng_x + dy * tng_y
-				return (tx + factor * d_tang * tng_x,
-				        ty + factor * d_tang * tng_y)
-			else:
-				# Project displacement onto normal direction (stroke weight)
-				d_norm = dx * nrm_x + dy * nrm_y
-				return (tx + factor * d_norm * nrm_x,
-				        ty + factor * d_norm * nrm_y)
-
-		font.disableUpdateInterface()
 		try:
-			has_weight = bool(weight)
-			has_wh = bool(width) or bool(height)
-			has_any = has_weight or has_wh or bool(slant)
+			tuner.setController_(controller)
+			tuner.setValue_forKey_(NSMutableArray.arrayWithArray_(layers), "layers")
+			setup_error = tuner.setup()
+			if setup_error:
+				raise RuntimeError(f"RMXTuner.setup() returned error: {setup_error}")
 
-			if not has_any:
-				font.enableUpdateInterface()
-				return {
-					"ok": True, "glyphName": glyph_name, "method": "no_change",
-					"params": {"weight": 0, "width": 0, "height": 0, "slant": 0},
-					"widthBefore": width_before, "widthAfter": width_before,
-				}
+			tuner.setPreview_(_checkbox(False))
+			tuner.setFixedWidth_(_checkbox(fixed_width))
 
-			# ── Step 1: Weight interpolation (between masters) ───────
-			if has_weight:
-				w_factor = (weight * sign) / axis_range
+			for selector, value, label in (
+				("setWidth_", width, "width"),
+				("setHeight_", height, "height"),
+				("setWeight_", weight, "weight"),
+				("setSlant_", slant, "slant"),
+				("setBlend_", blend, "blend"),
+			):
+				if hasattr(tuner, selector):
+					getattr(tuner, selector)(NSNumber.numberWithDouble_(float(value)))
+				elif value:
+					warnings.append(f"RMXTuner does not respond to {selector}; skipped {label}")
 
-				# Verify path compatibility
-				if len(target_layer.paths) != len(other_layer.paths):
-					raise RuntimeError(
-						f"Path count mismatch: {len(target_layer.paths)} "
-						f"vs {len(other_layer.paths)}")
-				for i, (tp, op) in enumerate(
-						zip(target_layer.paths, other_layer.paths)):
-					if len(tp.nodes) != len(op.nodes):
-						raise RuntimeError(
-							f"Path {i} node count mismatch: "
-							f"{len(tp.nodes)} vs {len(op.nodes)}")
-
-				new_paths = []
-				for tp, op in zip(target_layer.paths, other_layer.paths):
-					nodes_t = list(tp.nodes)
-					nodes_o = list(op.nodes)
-					nn = len(nodes_t)
-					path = GSPath()
-					for j in range(nn):
-						tn = nodes_t[j]
-						on = nodes_o[j]
-						tx = float(tn.position.x)
-						ty = float(tn.position.y)
-						ox = float(on.position.x)
-						oy = float(on.position.y)
-						# Linear interpolation: move toward other master
-						nx = round(tx + w_factor * (ox - tx))
-						ny = round(ty + w_factor * (oy - ty))
-						node = GSNode(NSPoint(nx, ny), tn.type)
-						node.smooth = tn.smooth
-						path.nodes.append(node)
-					path.closed = tp.closed
-					new_paths.append(path)
-
-				target_layer.beginChanges()
-				for p in list(target_layer.paths):
-					target_layer.removeShape_(p)
-				for p in new_paths:
-					target_layer.paths.append(p)
-				target_layer.endChanges()
-				# Restore sidebearings AFTER endChanges to avoid recalc
-				target_layer.LSB = lsb_before
-				target_layer.RSB = rsb_before
-
-			# ── Step 2: Width / Height scaling (compensated) ─────────
-			if has_wh:
-				# Width/Height are deltas in arbitrary units.
-				# Map to scale factors: delta → percentage-like scaling.
-				# A delta of +50 on a range of 800 ≈ 6% wider.
-				sx = 1.0 + (width / axis_range) if width else 1.0
-				sy = 1.0 + (height / axis_range) if height else 1.0
-
-				scaled_paths = []
-				for tp in target_layer.paths:
-					nodes_t = list(tp.nodes)
-					nn = len(nodes_t)
-					path = GSPath()
-					for j in range(nn):
-						tn = nodes_t[j]
-						tx = float(tn.position.x)
-						ty = float(tn.position.y)
-						# Displacement = scaled pos - original pos
-						dx = tx * (sx - 1.0)
-						dy = ty * (sy - 1.0)
-						# Apply only tangential component (preserve stroke weight)
-						nx, ny = _decomposed_pos(
-							tx, ty, dx, dy, 1.0, nodes_t, j, nn,
-							mode="tangential")
-						node = GSNode(NSPoint(round(nx), round(ny)), tn.type)
-						node.smooth = tn.smooth
-						path.nodes.append(node)
-					path.closed = tp.closed
-					scaled_paths.append(path)
-
-				target_layer.beginChanges()
-				for p in list(target_layer.paths):
-					target_layer.removeShape_(p)
-				for p in scaled_paths:
-					target_layer.paths.append(p)
-				target_layer.endChanges()
-				# Restore sidebearings AFTER endChanges to avoid recalc
-				target_layer.LSB = lsb_before
-				target_layer.RSB = rsb_before
-
-			# ── Step 3: Slant via native affine shear ────────────────
-			if slant != 0:
-				w_pre_slant = float(target_layer.width)
-				tan_slant = math.tan(math.radians(slant))
-				xform = NSAffineTransform.transform()
-				struct = xform.transformStruct()
-				struct.m21 = tan_slant
-				xform.setTransformStruct_(struct)
-				target_layer.beginChanges()
-				target_layer.transform_(xform)
-				target_layer.endChanges()
-
-			# ── Step 4: Fixed advance width ──────────────────────────
-			if fixed_width:
-				target_layer.width = width_before
-
-			method = "tuner"
+			# Use the same code path as RMX Tuner's UI Apply/OK action.
+			tuner.process_(None)
 		finally:
-			font.enableUpdateInterface()
+			if preserve_defaults and saved_defaults is not None:
+				_restore_defaults(defaults, saved_defaults)
+
+		after = {str(layer.layerId): _summary(layer) for layer in layers}
+		layer_results = []
+		for layer in layers:
+			lid = str(layer.layerId)
+			master_name = ""
+			try:
+				master_name = layer.associatedFontMaster().name
+			except Exception:
+				pass
+			layer_results.append({
+				"layerId": lid,
+				"master": master_name,
+				"before": before[lid],
+				"after": after[lid],
+				"changed": _changed(before[lid], after[lid]),
+			})
 
 		return {
 			"ok": True,
 			"glyphName": glyph_name,
-			"method": method,
-			"params": {"weight": weight, "width": width,
-			           "height": height, "slant": slant},
-			"widthBefore": width_before,
-			"widthAfter": float(target_layer.width),
-			"lsb": float(target_layer.LSB),
-			"rsb": float(target_layer.RSB),
+			"method": "rmx_tuner",
+			"params": {
+				"width": width,
+				"height": height,
+				"weight": weight,
+				"slant": slant,
+				"blend": blend,
+				"fixedWidth": fixed_width,
+				"allMasters": all_masters,
+				"masterId": master_id,
+			},
+			"processedLayers": len(layers),
+			"changedLayers": sum(1 for item in layer_results if item["changed"]),
+			"layers": layer_results,
+			"warnings": warnings,
 		}
 
 	result = bridge.execute_on_main(_tune)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
 	return 200, result
+
 
 
 # ── POST /api/filters/rmx/scale ──────────────────────────────────────────────
@@ -5751,13 +5745,14 @@ def _scale_native(layer, width_pct, height_pct, adjust_space=0, vertical_shift=0
 		layer.transform_(shift)
 
 
+
 @route("POST", "/api/filters/rmx/scale")
 def handle_rmx_scale(bridge, body=None, **kwargs):
 	"""Scale a glyph layer by percentage using RMX Scaler.
 
-	Uses process_() (the dialog code path) with mock NSTextField ivars so that
-	RMX's weight-compensated interpolation is applied across all masters.
-	Falls back to native affine transform if RMX is unavailable or fails.
+	Uses process_() (the dialog code path) so RMX's weight-compensated
+	interpolation is applied across all masters. Native affine fallback is
+	disabled by default because it cannot preserve stem weight.
 
 	Width/Height are percentages (100 = no change, 130 = 30% wider).
 	Weight/adjustSpace/verticalShift are RMX-specific deltas.
@@ -5772,6 +5767,7 @@ def handle_rmx_scale(bridge, body=None, **kwargs):
 	adjust_space = body.get("adjustSpace", 0)
 	vertical_shift = body.get("verticalShift", 0)
 	master_id = body.get("masterId", None)
+	allow_fallback = bool(body.get("allowFallback", False))
 
 	def _scale():
 		font = _require_font()
@@ -5784,6 +5780,7 @@ def handle_rmx_scale(bridge, body=None, **kwargs):
 		try:
 			layer.beginChanges()
 			rmx_ok = False
+			rmx_error = None
 			if _get_rmx_class("RMXScaler") is not None:
 				try:
 					_rmx_process(
@@ -5802,26 +5799,36 @@ def handle_rmx_scale(bridge, body=None, **kwargs):
 						rmx_ok = True
 						method = "rmx"
 				except Exception as e:
+					rmx_error = str(e)
 					print(f"[GlyphsMCP] RMXScaler failed: {e}")
+			else:
+				rmx_error = "RMXScaler class is not loaded"
 
 			if not rmx_ok:
-				method = "native_transform"
-				_scale_native(layer, width_pct, height_pct, adjust_space, vertical_shift)
+				if allow_fallback:
+					method = "native_transform"
+					_scale_native(layer, width_pct, height_pct, adjust_space, vertical_shift)
+				else:
+					method = "failed"
 			layer.endChanges()
 		finally:
 			font.enableUpdateInterface()
 
-		return {
-			"ok": True,
+		result = {
+			"ok": rmx_ok or method == "native_transform",
 			"glyphName": glyph_name,
 			"method": method,
 			"params": {"width": width_pct, "height": height_pct, "weight": weight},
 			"widthBefore": width_before,
 			"widthAfter": float(layer.width),
 		}
+		if not result["ok"]:
+			result["error"] = rmx_error or "RMX Scaler did not modify the glyph"
+		return result
 
 	result = bridge.execute_on_main(_scale)
 	return 200, result
+
 
 
 # ── POST /api/filters/rmx/monospace ──────────────────────────────────────────
@@ -5986,4 +5993,2924 @@ def handle_execute(bridge, body=None, **kwargs):
 		return {"ok": error is None, "output": output, "error": error}
 
 	result = bridge.execute_on_main(_execute)
+	return 200, result
+
+def _glyphs_string(value):
+	"""Convert Cocoa/Python strings to a plain Python str."""
+	if value is None:
+		return None
+	try:
+		return value.stringByExpandingTildeInPath()
+	except AttributeError:
+		return str(value)
+
+
+_BD_STYLE_MAP = {
+	"LIGHT": "light",
+	"HEAVY": "heavy",
+	"DOUBLE": "double",
+	"SINGLE": "light",
+}
+
+
+def _bd_rect_path(x1, y1, x2, y2):
+	"""Return a rectangle path dict if it has positive area."""
+	x1, x2 = sorted((float(x1), float(x2)))
+	y1, y2 = sorted((float(y1), float(y2)))
+	if x2 - x1 <= 0 or y2 - y1 <= 0:
+		return None
+	return {
+		"closed": True,
+		"nodes": [
+			{"x": x1, "y": y1, "type": "line", "smooth": False},
+			{"x": x2, "y": y1, "type": "line", "smooth": False},
+			{"x": x2, "y": y2, "type": "line", "smooth": False},
+			{"x": x1, "y": y2, "type": "line", "smooth": False},
+		],
+	}
+
+
+def _bd_poly_path(points):
+	"""Return a closed polygon path dict from point tuples."""
+	if len(points) < 3:
+		return None
+	return {
+		"closed": True,
+		"nodes": [
+			{"x": float(x), "y": float(y), "type": "line", "smooth": False}
+			for x, y in points
+		],
+	}
+
+
+def _bd_existing_glyph_has_drawing(glyph):
+	"""Whether any layer already contains outlines/components."""
+	if glyph is None:
+		return False
+	for layer in glyph.layers:
+		if len(layer.paths) > 0 or len(layer.components) > 0:
+			return True
+	return False
+
+
+def _bd_default_width(font, master_id):
+	"""Pick a reasonable width for generated box glyphs."""
+	for ref_name in ("zero.tf", "zero", "space", "A"):
+		glyph = font.glyphs[ref_name]
+		if glyph is not None:
+			layer = glyph.layers[master_id]
+			if layer is not None and float(layer.width) > 0:
+				return float(layer.width)
+	return float(font.upm)
+
+
+def _bd_default_strokes(font, master_id, width):
+	"""Infer light/heavy strokes and double-line gap from the font."""
+	light = None
+	for ref_name in ("H", "n"):
+		glyph = font.glyphs[ref_name]
+		if glyph is None:
+			continue
+		layer = glyph.layers[master_id]
+		if layer is None:
+			continue
+		measured = _auto_measure_glyph(layer)
+		light = measured.get("verticalStems", {}).get("dominant")
+		if light:
+			break
+	if not light:
+		light = max(20, int(round(width / 12.0)))
+	light = max(1, int(round(light)))
+	heavy = max(light + 1, int(round(light * 1.8)))
+	gap = max(1, int(round(light * 0.75)))
+	return light, heavy, gap
+
+
+def _bd_style_value(style, light, heavy):
+	if style == "double":
+		return light
+	if style == "heavy":
+		return heavy
+	return light
+
+
+def _bd_segment_rects(direction, style, width, asc, desc, light, heavy, gap):
+	"""Build rectangles for one segment from center to edge."""
+	xc = float(width) / 2.0
+	yc = (float(asc) + float(desc)) / 2.0
+	thickness = _bd_style_value(style, light, heavy)
+	rects = []
+
+	def _append_h(x1, x2, center_y, stroke):
+		rect = _bd_rect_path(x1, center_y - stroke / 2.0, x2, center_y + stroke / 2.0)
+		if rect:
+			rects.append(rect)
+
+	def _append_v(center_x, y1, y2, stroke):
+		rect = _bd_rect_path(center_x - stroke / 2.0, y1, center_x + stroke / 2.0, y2)
+		if rect:
+			rects.append(rect)
+
+	if direction in ("L", "R"):
+		x1, x2 = (0.0, xc) if direction == "L" else (xc, float(width))
+		if style == "double":
+			offset = (thickness + gap) / 2.0
+			_append_h(x1, x2, yc - offset, thickness)
+			_append_h(x1, x2, yc + offset, thickness)
+		else:
+			_append_h(x1, x2, yc, thickness)
+	elif direction in ("U", "D"):
+		y1, y2 = (yc, float(asc)) if direction == "U" else (float(desc), yc)
+		if style == "double":
+			offset = (thickness + gap) / 2.0
+			_append_v(xc - offset, y1, y2, thickness)
+			_append_v(xc + offset, y1, y2, thickness)
+		else:
+			_append_v(xc, y1, y2, thickness)
+
+	return rects
+
+
+def _bd_dash_rects(orientation, style, count, width, asc, desc, light, heavy):
+	"""Approximate dashed lines with repeated rectangular segments."""
+	thickness = _bd_style_value(style, light, heavy)
+	segments = max(2, count + 1)
+	rects = []
+	if orientation == "H":
+		gap_units = max(1.0, width * 0.08)
+		seg_w = max(1.0, (width - gap_units * (segments - 1)) / segments)
+		yc = (float(asc) + float(desc)) / 2.0
+		x = 0.0
+		for _ in range(segments):
+			rect = _bd_rect_path(x, yc - thickness / 2.0, x + seg_w, yc + thickness / 2.0)
+			if rect:
+				rects.append(rect)
+			x += seg_w + gap_units
+	else:
+		height = float(asc) - float(desc)
+		gap_units = max(1.0, height * 0.08)
+		seg_h = max(1.0, (height - gap_units * (segments - 1)) / segments)
+		xc = float(width) / 2.0
+		y = float(desc)
+		for _ in range(segments):
+			rect = _bd_rect_path(xc - thickness / 2.0, y, xc + thickness / 2.0, y + seg_h)
+			if rect:
+				rects.append(rect)
+			y += seg_h + gap_units
+	return rects
+
+
+def _bd_quadrant_rects(quadrants, width, asc, desc):
+	xc = float(width) / 2.0
+	yc = (float(asc) + float(desc)) / 2.0
+	rects = []
+	for quad in quadrants:
+		if quad == "upper left":
+			rects.append(_bd_rect_path(0.0, yc, xc, float(asc)))
+		elif quad == "upper right":
+			rects.append(_bd_rect_path(xc, yc, float(width), float(asc)))
+		elif quad == "lower left":
+			rects.append(_bd_rect_path(0.0, float(desc), xc, yc))
+		elif quad == "lower right":
+			rects.append(_bd_rect_path(xc, float(desc), float(width), yc))
+	return [r for r in rects if r]
+
+
+def _bd_shade_rects(level, width, asc, desc):
+	"""Approximate shade glyphs with a 4x4 checker pattern."""
+	rows = cols = 4
+	cell_w = float(width) / cols
+	cell_h = (float(asc) - float(desc)) / rows
+	rects = []
+	for row in range(rows):
+		for col in range(cols):
+			fill = False
+			if level == "light":
+				fill = (row + col) % 4 == 0
+			elif level == "medium":
+				fill = (row + col) % 2 == 0
+			elif level == "dark":
+				fill = (row + col) % 4 != 0
+			if not fill:
+				continue
+			x1 = col * cell_w
+			x2 = x1 + cell_w
+			y1 = float(desc) + row * cell_h
+			y2 = y1 + cell_h
+			rect = _bd_rect_path(x1, y1, x2, y2)
+			if rect:
+				rects.append(rect)
+	return rects
+
+
+def _bd_fraction_rects(direction, num, den, width, asc, desc):
+	"""Return one-sided fractional block rectangles."""
+	fraction = float(num) / float(den)
+	if direction == "upper":
+		y1 = float(asc) - (float(asc) - float(desc)) * fraction
+		return [_bd_rect_path(0.0, y1, float(width), float(asc))]
+	if direction == "lower":
+		y2 = float(desc) + (float(asc) - float(desc)) * fraction
+		return [_bd_rect_path(0.0, float(desc), float(width), y2)]
+	if direction == "left":
+		x2 = float(width) * fraction
+		return [_bd_rect_path(0.0, float(desc), x2, float(asc))]
+	if direction == "right":
+		x1 = float(width) * (1.0 - fraction)
+		return [_bd_rect_path(x1, float(desc), float(width), float(asc))]
+	return []
+
+
+def _bd_diagonal_path(x1, y1, x2, y2, thickness):
+	"""Return a thick diagonal as a 4-point polygon."""
+	import math
+	dx = float(x2) - float(x1)
+	dy = float(y2) - float(y1)
+	length = math.hypot(dx, dy)
+	if length <= 0:
+		return None
+	nx = -dy / length * thickness / 2.0
+	ny = dx / length * thickness / 2.0
+	return _bd_poly_path([
+		(x1 + nx, y1 + ny),
+		(x2 + nx, y2 + ny),
+		(x2 - nx, y2 - ny),
+		(x1 - nx, y1 - ny),
+	])
+
+
+def _bd_arc_path(corner, width, asc, desc, thickness):
+	"""Approximate a rounded box corner with a quarter-ring polygon."""
+	import math
+	height = float(asc) - float(desc)
+	outer = min(float(width), height) * 0.48
+	inner = max(outer - thickness, outer * 0.35)
+	if inner <= 0:
+		inner = outer * 0.5
+
+	if corner == "tl":
+		cx, cy = 0.0, float(asc)
+		a0, a1 = -90.0, 0.0
+	elif corner == "tr":
+		cx, cy = float(width), float(asc)
+		a0, a1 = -180.0, -90.0
+	elif corner == "br":
+		cx, cy = float(width), float(desc)
+		a0, a1 = 90.0, 180.0
+	else:
+		cx, cy = 0.0, float(desc)
+		a0, a1 = 0.0, 90.0
+
+	steps = 10
+	outer_pts = []
+	inner_pts = []
+	for i in range(steps + 1):
+		t = a0 + (a1 - a0) * i / steps
+		rad = math.radians(t)
+		outer_pts.append((cx + math.cos(rad) * outer, cy + math.sin(rad) * outer))
+	for i in range(steps, -1, -1):
+		t = a0 + (a1 - a0) * i / steps
+		rad = math.radians(t)
+		inner_pts.append((cx + math.cos(rad) * inner, cy + math.sin(rad) * inner))
+	return _bd_poly_path(outer_pts + inner_pts)
+
+
+def _bd_parse_box_edges(body):
+	"""Parse orthogonal BOX DRAWINGS names into edge styles."""
+	if "DIAGONAL" in body or "ARC" in body:
+		return None
+	tokens = body.split()
+	default_style = None
+	if tokens and tokens[0] in _BD_STYLE_MAP and len(tokens) > 1 and tokens[1] != "DASH":
+		default_style = _BD_STYLE_MAP[tokens[0]]
+		body = " ".join(tokens[1:])
+	parts = body.split(" AND ")
+	edges = {}
+	for part in parts:
+		ptoks = part.split()
+		style = default_style or "light"
+		if ptoks and ptoks[0] in _BD_STYLE_MAP and len(ptoks) > 1:
+			style = _BD_STYLE_MAP[ptoks[0]]
+			ptoks = ptoks[1:]
+		elif ptoks and ptoks[-1] in _BD_STYLE_MAP:
+			style = _BD_STYLE_MAP[ptoks[-1]]
+			ptoks = ptoks[:-1]
+		words = set(ptoks)
+		dirs = set()
+		if "HORIZONTAL" in words and "DOWN" in words:
+			dirs |= {"L", "R", "D"}
+		elif "HORIZONTAL" in words and "UP" in words:
+			dirs |= {"L", "R", "U"}
+		elif "VERTICAL" in words and "RIGHT" in words:
+			dirs |= {"U", "D", "R"}
+		elif "VERTICAL" in words and "LEFT" in words:
+			dirs |= {"U", "D", "L"}
+		elif "HORIZONTAL" in words:
+			dirs |= {"L", "R"}
+		elif "VERTICAL" in words:
+			dirs |= {"U", "D"}
+		else:
+			if "UP" in words:
+				dirs.add("U")
+			if "DOWN" in words:
+				dirs.add("D")
+			if "LEFT" in words:
+				dirs.add("L")
+			if "RIGHT" in words:
+				dirs.add("R")
+		if not dirs:
+			return None
+		for direction in dirs:
+			edges[direction] = style
+	return edges
+
+
+def _bd_generate_paths_for_codepoint(codepoint, width, asc, desc, light, heavy, gap):
+	"""Generate simple box-drawing/block-element paths from a Unicode codepoint."""
+	import unicodedata
+
+	ch = chr(codepoint)
+	try:
+		name = unicodedata.name(ch)
+	except ValueError:
+		return None, "Unnamed Unicode character"
+
+	if name.startswith("BOX DRAWINGS "):
+		body = name[len("BOX DRAWINGS "):]
+		if body == "LIGHT ARC DOWN AND RIGHT":
+			return [_bd_arc_path("tl", width, asc, desc, light)], None
+		if body == "LIGHT ARC DOWN AND LEFT":
+			return [_bd_arc_path("tr", width, asc, desc, light)], None
+		if body == "LIGHT ARC UP AND LEFT":
+			return [_bd_arc_path("br", width, asc, desc, light)], None
+		if body == "LIGHT ARC UP AND RIGHT":
+			return [_bd_arc_path("bl", width, asc, desc, light)], None
+		if body == "LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT":
+			return [_bd_diagonal_path(float(width), float(asc), 0.0, float(desc), light)], None
+		if body == "LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT":
+			return [_bd_diagonal_path(0.0, float(asc), float(width), float(desc), light)], None
+		if body == "LIGHT DIAGONAL CROSS":
+			return [
+				_bd_diagonal_path(0.0, float(asc), float(width), float(desc), light),
+				_bd_diagonal_path(float(width), float(asc), 0.0, float(desc), light),
+			], None
+		if "DASH" in body:
+			tokens = body.split()
+			style = "light"
+			if tokens and tokens[0] in _BD_STYLE_MAP:
+				style = _BD_STYLE_MAP[tokens[0]]
+			count = 2
+			if "TRIPLE" in tokens:
+				count = 3
+			elif "QUADRUPLE" in tokens:
+				count = 4
+			orientation = "H" if "HORIZONTAL" in tokens else "V" if "VERTICAL" in tokens else None
+			if orientation is None:
+				return None, f"Unsupported dashed box drawing: {name}"
+			return _bd_dash_rects(orientation, style, count, width, asc, desc, light, heavy), None
+
+		edges = _bd_parse_box_edges(body)
+		if edges is None:
+			return None, f"Unsupported box drawing form: {name}"
+		paths = []
+		for direction, style in edges.items():
+			paths.extend(_bd_segment_rects(direction, style, width, asc, desc, light, heavy, gap))
+		return paths, None
+
+	if (
+		name.endswith(" BLOCK")
+		or name.endswith(" SHADE")
+		or name.startswith("QUADRANT ")
+	):
+		body = name
+		if body == "FULL BLOCK":
+			return [_bd_rect_path(0.0, float(desc), float(width), float(asc))], None
+		if body in ("LIGHT SHADE", "MEDIUM SHADE", "DARK SHADE"):
+			return _bd_shade_rects(body.split()[0].lower(), width, asc, desc), None
+		if body.startswith("QUADRANT "):
+			quadrants = [part.strip().lower() for part in body[len("QUADRANT "):].split(" AND ")]
+			return _bd_quadrant_rects(quadrants, width, asc, desc), None
+
+		fraction_map = {
+			"ONE EIGHTH": (1, 8),
+			"ONE QUARTER": (1, 4),
+			"THREE EIGHTHS": (3, 8),
+			"HALF": (1, 2),
+			"FIVE EIGHTHS": (5, 8),
+			"THREE QUARTERS": (3, 4),
+			"SEVEN EIGHTHS": (7, 8),
+		}
+		direction = None
+		for candidate in ("UPPER", "LOWER", "LEFT", "RIGHT"):
+			if body.startswith(candidate + " "):
+				direction = candidate.lower()
+				rest = body[len(candidate) + 1:]
+				break
+		else:
+			rest = body
+		if direction and rest.endswith(" BLOCK"):
+			fraction_label = rest[:-len(" BLOCK")]
+			if fraction_label in fraction_map:
+				num, den = fraction_map[fraction_label]
+				return [r for r in _bd_fraction_rects(direction, num, den, width, asc, desc) if r], None
+
+		return None, f"Unsupported block element form: {name}"
+
+	return None, "Outside supported ranges"
+
+
+@route("GET", "/api/recipes")
+def handle_list_recipes(bridge, **kwargs):
+	"""List available workflow recipes."""
+	import os
+	recipes_dir = os.path.join(os.path.dirname(__file__), "recipes")
+	if not os.path.isdir(recipes_dir):
+		return 200, {"recipes": []}
+	recipes = []
+	for f in sorted(os.listdir(recipes_dir)):
+		if f.endswith(".md"):
+			name = f[:-3]
+			# Read first line as title
+			filepath = os.path.join(recipes_dir, f)
+			title = name
+			with open(filepath, "r", encoding="utf-8") as fh:
+				first_line = fh.readline().strip()
+				if first_line.startswith("# "):
+					title = first_line[2:].strip()
+					# Strip "Recipe: " prefix if present
+					if title.startswith("Recipe: "):
+						title = title[8:]
+			recipes.append({"name": name, "title": title})
+	return 200, {"recipes": recipes}
+
+
+@route("GET", "/api/recipes/{name}")
+def handle_get_recipe(bridge, name=None, **kwargs):
+	"""Get a specific workflow recipe by name."""
+	import os
+	if not name:
+		return 400, {"error": "Recipe name required"}
+	recipes_dir = os.path.join(os.path.dirname(__file__), "recipes")
+	filepath = os.path.join(recipes_dir, f"{name}.md")
+	if not os.path.isfile(filepath):
+		return 404, {"error": f"Recipe '{name}' not found"}
+	with open(filepath, "r", encoding="utf-8") as fh:
+		content = fh.read()
+
+	# Parse steps
+	steps = _parse_recipe_steps(content)
+
+	return 200, {"name": name, "content": content, "totalSteps": len(steps)}
+
+
+@route("GET", "/api/recipes/{name}/step/{step}")
+def handle_get_recipe_step(bridge, name=None, step=None, **kwargs):
+	"""Get a specific step from a recipe."""
+	import os
+	if not name:
+		return 400, {"error": "Recipe name required"}
+	if step is None:
+		return 400, {"error": "Step number required"}
+	try:
+		step_num = int(step)
+	except (ValueError, TypeError):
+		return 400, {"error": "Step must be a number"}
+
+	recipes_dir = os.path.join(os.path.dirname(__file__), "recipes")
+	filepath = os.path.join(recipes_dir, f"{name}.md")
+	if not os.path.isfile(filepath):
+		return 404, {"error": f"Recipe '{name}' not found"}
+	with open(filepath, "r", encoding="utf-8") as fh:
+		content = fh.read()
+
+	steps = _parse_recipe_steps(content)
+	if not steps:
+		return 404, {"error": "No steps found in recipe"}
+	if step_num < 1 or step_num > len(steps):
+		return 400, {"error": f"Step {step_num} out of range (1-{len(steps)})"}
+
+	s = steps[step_num - 1]
+	total = len(steps)
+
+	# Build mandatory directive for strict step ordering
+	if step_num < total:
+		directive = (
+			"MANDATORY: Execute ALL tools listed in this step and report results to the designer. "
+			"Then call get_recipe_step('%s', %d) to proceed to step %d of %d. "
+			"Do NOT skip ahead. Do NOT combine steps."
+		) % (name, step_num + 1, step_num + 1, total)
+	else:
+		directive = (
+			"MANDATORY: Execute ALL tools listed in this step and report results. "
+			"This is the FINAL step (%d of %d). After completing it, provide a full summary "
+			"of all findings across all steps."
+		) % (step_num, total)
+
+	return 200, {
+		"recipe": name,
+		"step": step_num,
+		"totalSteps": total,
+		"title": s["title"],
+		"content": s["content"],
+		"directive": directive,
+	}
+
+
+@route("POST", "/api/recipes")
+def handle_create_recipe(bridge, body=None, **kwargs):
+	"""Create a new workflow recipe."""
+	import os, re
+	if not body:
+		return 400, {"error": "Request body required"}
+
+	name = body.get("name", "").strip()
+	content = body.get("content", "").strip()
+
+	if not name:
+		return 400, {"error": "'name' is required (snake_case identifier)"}
+	if not content:
+		return 400, {"error": "'content' is required (markdown text)"}
+
+	# Validate name: only lowercase, digits, underscores
+	if not re.match(r'^[a-z0-9_]+$', name):
+		return 400, {"error": "Recipe name must be snake_case (lowercase, digits, underscores only)"}
+
+	recipes_dir = os.path.join(os.path.dirname(__file__), "recipes")
+	os.makedirs(recipes_dir, exist_ok=True)
+	filepath = os.path.join(recipes_dir, f"{name}.md")
+
+	overwrite = body.get("overwrite", False)
+	if os.path.isfile(filepath) and not overwrite:
+		return 409, {"error": f"Recipe '{name}' already exists. Set overwrite=true to replace."}
+
+	with open(filepath, "w", encoding="utf-8") as fh:
+		fh.write(content)
+
+	# Read back title
+	title = name
+	first_line = content.split("\n")[0].strip()
+	if first_line.startswith("# "):
+		title = first_line[2:].strip()
+		if title.startswith("Recipe: "):
+			title = title[8:]
+
+	return 201, {"name": name, "title": title, "created": True}
+
+
+@route("DELETE", "/api/recipes/{name}")
+def handle_delete_recipe(bridge, name=None, **kwargs):
+	"""Delete a workflow recipe."""
+	import os
+	if not name:
+		return 400, {"error": "Recipe name required"}
+
+	recipes_dir = os.path.join(os.path.dirname(__file__), "recipes")
+	filepath = os.path.join(recipes_dir, f"{name}.md")
+	if not os.path.isfile(filepath):
+		return 404, {"error": f"Recipe '{name}' not found"}
+
+	os.remove(filepath)
+	return 200, {"name": name, "deleted": True}
+
+
+def _parse_recipe_steps(content):
+	"""Parse numbered ### steps from recipe markdown.
+
+	Expected format:
+		### 1. Step title
+		Step content...
+
+		### 2. Another step
+		More content...
+
+	Returns list of {"number": int, "title": str, "content": str}.
+	"""
+	import re
+	steps = []
+	# Split on ### N. or ### Step N headings
+	pattern = r'^###\s+(\d+)\.\s*(.*?)$'
+	lines = content.split('\n')
+	current_step = None
+	current_lines = []
+
+	for line in lines:
+		m = re.match(pattern, line)
+		if m:
+			# Save previous step
+			if current_step is not None:
+				steps.append({
+					"number": current_step["number"],
+					"title": current_step["title"],
+					"content": "\n".join(current_lines).strip(),
+				})
+			current_step = {
+				"number": int(m.group(1)),
+				"title": m.group(2).strip(),
+			}
+			current_lines = []
+		elif current_step is not None:
+			current_lines.append(line)
+
+	# Save last step
+	if current_step is not None:
+		steps.append({
+			"number": current_step["number"],
+			"title": current_step["title"],
+			"content": "\n".join(current_lines).strip(),
+		})
+
+	return steps
+
+
+@route("POST", "/api/font/glyphs/bulk-create")
+def handle_bulk_create_glyphs(bridge, body=None, **kwargs):
+	"""Create multiple glyphs at once. Skips existing glyphs."""
+	if not body or "glyphs" not in body:
+		return 400, {"error": "Body must contain 'glyphs' array with [{name, unicode?}, ...]"}
+
+	glyphs_to_create = body["glyphs"]
+	color_label = body.get("color", None)  # optional color marking
+
+	def _run():
+		from GlyphsApp import Glyphs, GSGlyph
+		font = _require_font()
+
+		created = []
+		skipped = []
+
+		font.disableUpdateInterface()
+		try:
+			for ginfo in glyphs_to_create:
+				name = ginfo if isinstance(ginfo, str) else ginfo.get("name")
+				if not name:
+					continue
+
+				# Skip existing
+				if font.glyphs[name]:
+					skipped.append(name)
+					continue
+
+				glyph = GSGlyph(name)
+
+				# Set unicode if provided (GlyphsApp auto-assigns from name if not)
+				unicode_val = None if isinstance(ginfo, str) else ginfo.get("unicode")
+				if unicode_val:
+					glyph.unicode = str(unicode_val)
+
+				font.glyphs.append(glyph)
+
+				# Color marking
+				if color_label is not None:
+					glyph.color = int(color_label)
+
+				created.append(name)
+		finally:
+			font.enableUpdateInterface()
+
+		return {
+			"ok": True,
+			"created": len(created),
+			"skipped": len(skipped),
+			"createdGlyphs": created[:200],
+			"skippedGlyphs": skipped[:200],
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 500, {"ok": False, "error": result["error"]}
+	return 201, result
+
+
+@route("POST", "/api/font/export-instance")
+def handle_export_instance(bridge, body=None, **kwargs):
+	"""Export an instance to a temporary binary and return it as base64."""
+	body = body or {}
+	instance_name = body.get("instanceName", "")
+	export_format = str(body.get("format", "otf") or "otf").lower()
+
+	if export_format not in ("otf", "ttf"):
+		return 400, {"error": "Unsupported format. Use 'otf' or 'ttf'."}
+
+	def _run():
+		import base64
+		import os
+		import shutil
+		import tempfile
+
+		font = _require_font()
+
+		instances = [inst for inst in font.instances if getattr(inst, "exports", True)]
+		if not instances:
+			instances = list(font.instances)
+		if not instances:
+			return {"error": "No instances available to export"}
+
+		instance = None
+		if instance_name:
+			for inst in instances:
+				if str(inst.name) == instance_name:
+					instance = inst
+					break
+			if instance is None:
+				return {"error": f"Instance '{instance_name}' not found"}
+		else:
+			instance = instances[0]
+
+		temp_dir = tempfile.mkdtemp(prefix="glyphsmcp-export-")
+		try:
+			result = instance.generate(
+				format=export_format.upper(),
+				fontPath=temp_dir,
+				autoHint=False,
+				removeOverlap=True,
+				useSubroutines=True,
+				useProductionNames=True,
+			)
+			if result is not True:
+				return {"error": f"Export failed: {result}"}
+
+			exported_path = None
+			if hasattr(instance, "lastExportedFilePath") and instance.lastExportedFilePath:
+				exported_path = _glyphs_string(instance.lastExportedFilePath)
+			if not exported_path or not os.path.isfile(exported_path):
+				ext = f".{export_format}"
+				candidates = [
+					os.path.join(temp_dir, name)
+					for name in os.listdir(temp_dir)
+					if name.lower().endswith(ext)
+				]
+				if not candidates:
+					return {"error": f"Export succeeded but no .{export_format} file was found"}
+				exported_path = sorted(candidates)[0]
+
+			with open(exported_path, "rb") as fh:
+				font_data = base64.b64encode(fh.read()).decode("ascii")
+
+			return {
+				"ok": True,
+				"instanceName": str(instance.name),
+				"familyName": str(font.familyName),
+				"format": export_format,
+				"fileName": os.path.basename(exported_path),
+				"fontData": font_data,
+			}
+		finally:
+			shutil.rmtree(temp_dir, ignore_errors=True)
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 500, {"ok": False, "error": result["error"]}
+	return 200, result
+
+
+@route("POST", "/api/font/box-drawing/generate")
+def handle_generate_box_drawing(bridge, body=None, **kwargs):
+	"""Generate box drawing and block element glyphs in the open font."""
+	body = body or {}
+	glyph_names = body.get("glyphNames", []) or []
+	overwrite = bool(body.get("overwrite", False))
+	color_label = body.get("color", 7)
+	custom_width = float(body.get("width", 0) or 0)
+	custom_light = float(body.get("stroke", 0) or 0)
+	custom_heavy = float(body.get("heavyStroke", 0) or 0)
+	custom_gap = float(body.get("doubleGap", 0) or 0)
+
+	def _run():
+		import unicodedata
+		from GlyphsApp import GSGlyph, GSPath, GSNode
+		from Foundation import NSPoint
+
+		font = _require_font()
+
+		def _glyph_name_for_codepoint(codepoint):
+			for g in font.glyphs:
+				if g.unicode and int(str(g.unicode), 16) == codepoint:
+					return str(g.name)
+			return f"uni{codepoint:04X}"
+
+		def _target_codepoints():
+			if glyph_names:
+				result = []
+				for name in glyph_names:
+					if isinstance(name, int):
+						result.append(int(name))
+						continue
+					s = str(name).strip()
+					if not s:
+						continue
+					if s.startswith("U+"):
+						result.append(int(s[2:], 16))
+						continue
+					glyph = font.glyphs[s]
+					if glyph is not None and glyph.unicode:
+						result.append(int(str(glyph.unicode), 16))
+						continue
+					if len(s) == 1:
+						result.append(ord(s))
+						continue
+					raise ValueError(f"Cannot resolve glyph/codepoint '{s}'")
+				return sorted(set(result))
+			return list(range(0x2500, 0x25A0))
+
+		codepoints = _target_codepoints()
+		created = []
+		updated = []
+		skipped_existing = []
+		unsupported = []
+
+		font.disableUpdateInterface()
+		try:
+			for codepoint in codepoints:
+				glyph_name = _glyph_name_for_codepoint(codepoint)
+				glyph = font.glyphs[glyph_name]
+				if glyph is None:
+					glyph = GSGlyph(glyph_name)
+					glyph.unicode = f"{codepoint:04X}"
+					font.glyphs.append(glyph)
+					if color_label is not None:
+						glyph.color = int(color_label)
+					created.append(glyph_name)
+				elif _bd_existing_glyph_has_drawing(glyph) and not overwrite:
+					skipped_existing.append(glyph_name)
+					continue
+
+				generated_any = False
+				last_reason = None
+				for master in font.masters:
+					layer = glyph.layers[master.id]
+					width = custom_width if custom_width > 0 else (_bd_default_width(font, master.id) if float(layer.width) <= 0 else float(layer.width))
+					auto_light, auto_heavy, auto_gap = _bd_default_strokes(font, master.id, width)
+					light = custom_light if custom_light > 0 else auto_light
+					heavy = custom_heavy if custom_heavy > 0 else auto_heavy
+					gap = custom_gap if custom_gap > 0 else auto_gap
+					paths_data, reason = _bd_generate_paths_for_codepoint(
+						codepoint, width, float(master.ascender), float(master.descender), light, heavy, gap
+					)
+					if not paths_data:
+						last_reason = reason
+						continue
+
+					layer.beginChanges()
+					try:
+						for shape in list(layer.shapes):
+							layer.removeShape_(shape)
+						for pdata in paths_data:
+							path = GSPath()
+							for ndata in pdata.get("nodes", []):
+								node = GSNode()
+								node.position = NSPoint(float(ndata["x"]), float(ndata["y"]))
+								node.type = _str_to_node_type(ndata.get("type", "line"))
+								node.smooth = bool(ndata.get("smooth", False))
+								path.nodes.append(node)
+							path.closed = pdata.get("closed", True)
+							layer.paths.append(path)
+						layer.width = float(width)
+						layer.correctPathDirection()
+					finally:
+						layer.endChanges()
+					generated_any = True
+
+				if generated_any:
+					if glyph_name not in created:
+						updated.append(glyph_name)
+				else:
+					unsupported.append({
+						"glyphName": glyph_name,
+						"unicode": f"{codepoint:04X}",
+						"name": unicodedata.name(chr(codepoint), f"U+{codepoint:04X}"),
+						"reason": last_reason or "Unsupported",
+					})
+		finally:
+			font.enableUpdateInterface()
+
+		return {
+			"ok": True,
+			"created": len(created),
+			"updated": len(updated),
+			"skippedExisting": len(skipped_existing),
+			"unsupported": len(unsupported),
+			"createdGlyphs": created[:200],
+			"updatedGlyphs": updated[:200],
+			"skippedExistingGlyphs": skipped_existing[:200],
+			"unsupportedGlyphs": unsupported[:200],
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 500, {"ok": False, "error": result["error"]}
+	return 200, result
+
+
+_KERN_GROUP_MAP = {
+	# ── Uppercase ──
+	"A": ("A", "A"),
+	"B": ("H", "D"),
+	"C": ("O", "C"),
+	"D": ("H", "O"),
+	"E": ("H", "E"),
+	"F": ("H", "F"),
+	"G": ("O", "G"),
+	"H": ("H", "H"),
+	"I": ("H", "H"),
+	"J": ("J", "J"),
+	"K": ("H", "K"),
+	"L": ("H", "L"),
+	"M": ("H", "H"),
+	"N": ("H", "H"),
+	"O": ("O", "O"),
+	"P": ("H", "P"),
+	"Q": ("O", "O"),
+	"R": ("H", "R"),
+	"S": ("S", "S"),
+	"T": ("T", "T"),
+	"U": ("H", "U"),
+	"V": ("V", "V"),
+	"W": ("V", "V"),
+	"X": ("X", "X"),
+	"Y": ("V", "Y"),
+	"Z": ("Z", "Z"),
+	# ── Lowercase ──
+	"a": ("o", "a"),
+	"b": ("h", "o"),
+	"c": ("o", "c"),
+	"d": ("o", "l"),
+	"e": ("o", "e"),
+	"f": ("f", "f"),
+	"g": ("o", "g"),
+	"h": ("h", "n"),
+	"i": ("h", "l"),
+	"j": ("j", "j"),
+	"k": ("h", "k"),
+	"l": ("h", "l"),
+	"m": ("h", "n"),
+	"n": ("h", "n"),
+	"o": ("o", "o"),
+	"p": ("h", "o"),
+	"q": ("o", "l"),
+	"r": ("h", "r"),
+	"s": ("s", "s"),
+	"t": ("t", "t"),
+	"u": ("u", "n"),
+	"v": ("v", "v"),
+	"w": ("v", "v"),
+	"x": ("x", "x"),
+	"y": ("v", "y"),
+	"z": ("z", "z"),
+	# ── Figures ──
+	"zero": ("zero", "zero"),
+	"one": ("one", "one"),
+	"two": ("two", "two"),
+	"three": ("three", "three"),
+	"four": ("four", "four"),
+	"five": ("five", "five"),
+	"six": ("six", "six"),
+	"seven": ("seven", "seven"),
+	"eight": ("eight", "eight"),
+	"nine": ("nine", "nine"),
+	# ── Common ligatures ──
+	"fi": ("f", "h"),
+	"fl": ("f", "h"),
+	"f_i": ("f", "h"),
+	"f_l": ("f", "h"),
+	# ── Punctuation/symbols with kerning relevance ──
+	"period": ("period", "period"),
+	"comma": ("period", "period"),
+	"colon": ("period", "period"),
+	"semicolon": ("period", "period"),
+	"ellipsis": ("period", "period"),
+	"quoteright": ("quoteright", "quoteright"),
+	"quotedblright": ("quoteright", "quoteright"),
+	"quoteleft": ("quoteleft", "quoteleft"),
+	"quotedblleft": ("quoteleft", "quoteleft"),
+	"hyphen": ("hyphen", "hyphen"),
+	"endash": ("hyphen", "hyphen"),
+	"emdash": ("hyphen", "hyphen"),
+	"parenleft": ("parenleft", "parenleft"),
+	"parenright": ("parenright", "parenright"),
+	"bracketleft": ("bracketleft", "bracketleft"),
+	"bracketright": ("bracketright", "bracketright"),
+	"guillemotleft": ("guillemotleft", "guillemotleft"),
+	"guillemotright": ("guillemotright", "guillemotright"),
+}
+
+
+_SIDE_FALLBACK_LEFT = {
+	("UC", "straight"): "H", ("UC", "round"): "O", ("UC", "open"): "A",
+	("LC", "straight"): "h", ("LC", "round"): "o", ("LC", "open"): "v",
+	("FIG", "straight"): "one", ("FIG", "round"): "zero", ("FIG", "open"): "seven",
+}
+
+
+_SIDE_FALLBACK_RIGHT = {
+	("UC", "straight"): "H", ("UC", "round"): "O", ("UC", "open"): "T",
+	("LC", "straight"): "h", ("LC", "round"): "o", ("LC", "open"): "r",
+	("FIG", "straight"): "one", ("FIG", "round"): "zero", ("FIG", "open"): "seven",
+}
+
+
+_FIGURE_NAMES = frozenset([
+	"zero", "one", "two", "three", "four", "five",
+	"six", "seven", "eight", "nine",
+])
+
+
+def _glyph_case_group(glyph):
+	"""Classify glyph as 'UC', 'LC', or 'FIG'."""
+	name = str(glyph.name)
+	base = name.split(".")[0]
+	if base in _FIGURE_NAMES:
+		return "FIG"
+	sub = glyph.subCategory
+	if sub == "Uppercase":
+		return "UC"
+	if sub == "Lowercase":
+		return "LC"
+	# Fallback: unicode category
+	u = glyph.unicode
+	if u:
+		try:
+			import unicodedata
+			cat = unicodedata.category(chr(int(u, 16)))
+			if cat == "Lu":
+				return "UC"
+			if cat == "Ll":
+				return "LC"
+		except (ValueError, TypeError):
+			pass
+	# Last resort: single char name
+	if len(base) == 1:
+		return "UC" if base.isupper() else "LC"
+	return "LC"
+
+
+def _infer_side_type_kern(layer, side, zone_top):
+	"""Heuristic: classify side by measuring contour edge variation.
+	Returns 'straight', 'round', or 'open'."""
+	from AppKit import NSPoint
+	if not layer or not layer.paths:
+		return "open"
+	if not zone_top or zone_top <= 0:
+		return "open"
+	step = max(int(zone_top / 10), 10)
+	edge_xs = []
+	y = 0
+	while y <= zone_top:
+		wide = 10000
+		p1 = NSPoint(-wide, y)
+		p2 = NSPoint(wide, y)
+		raw = layer.intersectionsBetweenPoints(p1, p2)
+		if raw:
+			eps = 1.0
+			xs = sorted(p.x for p in raw if p.x > (-wide + eps) and p.x < (wide - eps))
+			if xs:
+				edge_xs.append(max(xs) if side == "right" else min(xs))
+		y += step
+	if len(edge_xs) < 3:
+		return "open"
+	x_range = max(edge_xs) - min(edge_xs)
+	fraction = x_range / zone_top
+	if fraction < 0.08:
+		return "straight"
+	elif fraction < 0.25:
+		return "round"
+	return "open"
+
+
+def _resolve_kern_groups(glyph, font, master):
+	"""Resolve kerning groups for a glyph.
+
+	Priority chain:
+	1. Dictionary lookup (base name)
+	2. Dot-suffix stripping (a.ss01 → a)
+	3. Component inheritance (Aacute → A via first component)
+	4. Unicode decomposition (Aacute → A via unicode)
+	5. Contour analysis fallback
+
+	Returns (left_group, right_group, method) where method describes how it was resolved.
+	"""
+	name = str(glyph.name)
+
+	# 1. Direct dictionary lookup
+	if name in _KERN_GROUP_MAP:
+		lg, rg = _KERN_GROUP_MAP[name]
+		return lg, rg, "dictionary"
+
+	# 2. Dot-suffix stripping
+	base = name.split(".")[0]
+	suffix = name[len(base):] if len(name) > len(base) else ""
+	if base in _KERN_GROUP_MAP:
+		lg, rg = _KERN_GROUP_MAP[base]
+		return lg, rg, "suffix_strip"
+
+	# For .smcp / .c2sc: try uppercase equivalent
+	if suffix in (".smcp", ".c2sc") and len(base) == 1:
+		uc_base = base.upper()
+		if uc_base in _KERN_GROUP_MAP:
+			lg, rg = _KERN_GROUP_MAP[uc_base]
+			return lg, rg, "smcp"
+
+	# 3. Component inheritance
+	# Find first layer that has components
+	layer = glyph.layers[str(master.id)] if master else (glyph.layers[0] if glyph.layers else None)
+	if layer and layer.components:
+		comp = layer.components[0]
+		comp_name = str(comp.componentName)
+		comp_glyph = font.glyphs[comp_name]
+		if comp_glyph:
+			# Recurse on the component base (but only one level to avoid loops)
+			if comp_name in _KERN_GROUP_MAP:
+				lg, rg = _KERN_GROUP_MAP[comp_name]
+				return lg, rg, "component"
+			comp_base = comp_name.split(".")[0]
+			if comp_base in _KERN_GROUP_MAP:
+				lg, rg = _KERN_GROUP_MAP[comp_base]
+				return lg, rg, "component"
+
+	# 4. Unicode decomposition
+	u = glyph.unicode
+	if u:
+		try:
+			import unicodedata
+			char = chr(int(u, 16))
+			decomp = unicodedata.decomposition(char)
+			if decomp:
+				base_cp = decomp.split()[0]
+				if not base_cp.startswith("<"):
+					base_char = chr(int(base_cp, 16))
+					if base_char in _KERN_GROUP_MAP:
+						lg, rg = _KERN_GROUP_MAP[base_char]
+						return lg, rg, "unicode_decomp"
+		except (ValueError, TypeError):
+			pass
+
+	# 5. Contour analysis fallback
+	case = _glyph_case_group(glyph)
+	zone_top = master.capHeight if case == "UC" else master.xHeight
+	if layer:
+		try:
+			decomposed = layer.copyDecomposedLayer()
+		except Exception:
+			decomposed = layer
+		left_type = _infer_side_type_kern(decomposed, "left", zone_top)
+		right_type = _infer_side_type_kern(decomposed, "right", zone_top)
+	else:
+		left_type = "open"
+		right_type = "open"
+
+	lg = _SIDE_FALLBACK_LEFT.get((case, left_type), base if len(base) == 1 else "H")
+	rg = _SIDE_FALLBACK_RIGHT.get((case, right_type), base if len(base) == 1 else "H")
+	return lg, rg, "contour_analysis"
+
+
+@route("POST", "/api/font/kerning/groups/analyze")
+def handle_analyze_kerning_groups(bridge, body=None, **kwargs):
+	"""Analyze and optionally assign kerning groups to glyphs.
+
+	Uses dictionary + component inheritance + contour analysis.
+	"""
+	if not body:
+		body = {}
+
+	glyph_names = body.get("glyphNames")  # None = all Letter/Number glyphs
+	apply_groups = body.get("apply", True)
+	overwrite = body.get("overwrite", True)
+
+	def _run():
+		from GlyphsApp import Glyphs
+		font = _require_font()
+		master = font.selectedFontMaster
+
+		# Determine which glyphs to process
+		if glyph_names:
+			glyphs = [font.glyphs[n] for n in glyph_names if font.glyphs[n]]
+		else:
+			glyphs = [g for g in font.glyphs if g.category in ("Letter", "Number", "Punctuation")]
+
+		results = []
+		stats = {
+			"total": 0,
+			"would_change_left": 0,
+			"would_change_right": 0,
+			"already_match": 0,
+			"skipped_existing": 0,
+			"applied_left": 0,
+			"applied_right": 0,
+			"by_method": {},
+		}
+
+		for glyph in glyphs:
+			name = str(glyph.name)
+			current_left = str(glyph.leftKerningGroup) if glyph.leftKerningGroup else ""
+			current_right = str(glyph.rightKerningGroup) if glyph.rightKerningGroup else ""
+
+			proposed_left, proposed_right, method = _resolve_kern_groups(glyph, font, master)
+
+			stats["total"] += 1
+			stats["by_method"][method] = stats["by_method"].get(method, 0) + 1
+
+			left_matches = current_left == proposed_left
+			right_matches = current_right == proposed_right
+
+			left_action = "match"
+			right_action = "match"
+
+			if not left_matches:
+				if current_left and not overwrite:
+					left_action = "skip_existing"
+					stats["skipped_existing"] += 1
+				else:
+					left_action = "change"
+					stats["would_change_left"] += 1
+					if apply_groups:
+						glyph.leftKerningGroup = proposed_left
+						stats["applied_left"] += 1
+			else:
+				stats["already_match"] += 1
+
+			if not right_matches:
+				if current_right and not overwrite:
+					right_action = "skip_existing"
+					stats["skipped_existing"] += 1
+				else:
+					right_action = "change"
+					stats["would_change_right"] += 1
+					if apply_groups:
+						glyph.rightKerningGroup = proposed_right
+						stats["applied_right"] += 1
+			else:
+				stats["already_match"] += 1
+
+			# Only include in results if something is notable
+			if not (left_matches and right_matches):
+				results.append({
+					"glyph": name,
+					"currentLeft": current_left,
+					"currentRight": current_right,
+					"proposedLeft": proposed_left,
+					"proposedRight": proposed_right,
+					"leftAction": left_action,
+					"rightAction": right_action,
+					"method": method,
+				})
+
+		# Color marking (dry run or apply)
+		for r in results:
+			g = font.glyphs[r["glyph"]]
+			if not g:
+				continue
+			if r["leftAction"] == "change" or r["rightAction"] == "change":
+				if apply_groups:
+					g.color = 4  # green = applied
+				else:
+					g.color = 3  # yellow = proposed change
+			elif r["leftAction"] == "skip_existing" or r["rightAction"] == "skip_existing":
+				g.color = 1  # orange = has existing, skipped
+
+		# Build group summary
+		group_summary = {"left": {}, "right": {}}
+		for glyph in glyphs:
+			lg = str(glyph.leftKerningGroup) if glyph.leftKerningGroup else ""
+			rg = str(glyph.rightKerningGroup) if glyph.rightKerningGroup else ""
+			if lg:
+				group_summary["left"].setdefault(lg, []).append(str(glyph.name))
+			if rg:
+				group_summary["right"].setdefault(rg, []).append(str(glyph.name))
+
+		return {
+			"ok": True,
+			"applied": apply_groups,
+			"overwrite": overwrite,
+			"stats": stats,
+			"changes": results,
+			"changeCount": len(results),
+			"groupSummary": group_summary,
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
+	return 200, result
+
+
+def _measure_ref_stems(font, master_id):
+	"""Measure V-stem and H-stem on reference glyphs.
+
+	V-stems: H (UC), n (LC) — horizontal rays in the mid-zone
+	H-stems: H crossbar (UC), o top/bottom (LC) — vertical rays at center
+
+	Uses horizontal rays for V-stems and vertical rays for H-stems.
+	More reliable than perpendicular ray-casting which picks up arch
+	thickness instead of stem width at heavy weights.
+
+	Returns dict: {"uc_v": int, "uc_h": int, "lc_v": int, "lc_h": int}
+	All values are dominant stem thickness in units, or None if unmeasurable.
+	"""
+	result = {}
+
+	master = None
+	for m in font.masters:
+		if m.id == master_id:
+			master = m
+			break
+	if master is None:
+		master = font.masters[0]
+
+	cap_h = int(master.capHeight) if master.capHeight else 700
+	x_h = int(master.xHeight) if master.xHeight else 500
+
+	# ── V-stems: H (UC), n (LC) via horizontal rays ──
+	v_refs = {"uc": ("H", cap_h), "lc": ("n", x_h)}
+	for case, (gname, zone_h) in v_refs.items():
+		glyph = font.glyphs[gname]
+		if glyph is None:
+			result[f"{case}_v"] = None
+			continue
+		layer = glyph.layers[master_id]
+		if layer is None:
+			result[f"{case}_v"] = None
+			continue
+		clean = layer.copyDecomposedLayer()
+		clean.removeOverlap()
+		if len(clean.paths) == 0:
+			result[f"{case}_v"] = None
+			continue
+
+		y_positions = [zone_h * f for f in [0.3, 0.4, 0.5, 0.6, 0.7]]
+		h_meas = _measure_stems_horizontal(clean, y_positions)
+		v_thicknesses = []
+		for md in h_meas:
+			for s in md["stems"]:
+				t = s["thickness"]
+				if t < float(clean.width) * 0.6:
+					v_thicknesses.append(t)
+		result[f"{case}_v"] = _find_dominant_stem(v_thicknesses, strategy="thickest") if v_thicknesses else None
+
+	# ── H-stems: H crossbar (UC), o top/bottom (LC) via vertical rays ──
+	h_refs = {"uc": ("H", cap_h), "lc": ("o", x_h)}
+	for case, (gname, zone_h) in h_refs.items():
+		glyph = font.glyphs[gname]
+		if glyph is None:
+			result[f"{case}_h"] = None
+			continue
+		layer = glyph.layers[master_id]
+		if layer is None:
+			result[f"{case}_h"] = None
+			continue
+		clean = layer.copyDecomposedLayer()
+		clean.removeOverlap()
+		if len(clean.paths) == 0:
+			result[f"{case}_h"] = None
+			continue
+
+		# Single vertical ray at center — off-center positions on thick
+		# weights have no visible counter, returning full glyph height
+		x_center = float(clean.width) * 0.5
+		# y range generous to avoid clipping overshoots
+		v_meas = _measure_stems_vertical(clean, [x_center], y_min=-50, y_max=zone_h + 100)
+		h_thicknesses = []
+		for md in v_meas:
+			for s in md["stems"]:
+				t = s["thickness"]
+				if t < zone_h * 0.5:
+					h_thicknesses.append(t)
+		# Pick thinnest — actual H-stems are always thinner than residual
+		# full-height segments or counter measurements
+		if h_thicknesses:
+			result[f"{case}_h"] = int(round(min(h_thicknesses)))
+		else:
+			result[f"{case}_h"] = None
+
+	return result
+
+
+def _measure_diagonal_angle(layer):
+	"""Measure the average angle of diagonal strokes in a glyph.
+
+	Finds the steepest long segments (>30% of bounds height) and returns
+	their average angle from vertical in degrees.  Used to calculate the
+	OffsetCurve compensation factor for diagonal glyphs.
+
+	Returns angle in degrees from vertical (0 = vertical, 45 = 45°),
+	or None if no diagonal segments found.
+	"""
+	import math
+	bounds = layer.bounds
+	if bounds.size.height < 10:
+		return None
+
+	min_seg_len = bounds.size.height * 0.3
+	angles = []
+
+	for path in layer.paths:
+		nodes = list(path.nodes)
+		nn = len(nodes)
+		for i in range(nn):
+			n0 = nodes[i]
+			n1 = nodes[(i + 1) % nn]
+			# Only on-curve to on-curve segments
+			if n0.type == "offcurve" or n1.type == "offcurve":
+				continue
+			dx = float(n1.position.x) - float(n0.position.x)
+			dy = float(n1.position.y) - float(n0.position.y)
+			seg_len = math.sqrt(dx * dx + dy * dy)
+			if seg_len < min_seg_len:
+				continue
+			# Angle from vertical (0° = vertical, 90° = horizontal)
+			angle_from_vert = abs(math.degrees(math.atan2(abs(dx), abs(dy))))
+			# Only count diagonal segments (15°-75° from vertical)
+			if 15 < angle_from_vert < 75:
+				angles.append(angle_from_vert)
+
+	if not angles:
+		return None
+	return sum(angles) / len(angles)
+
+
+@route("POST", "/api/font/smart-scale")
+def handle_smart_scale(bridge, body=None, **kwargs):
+	"""Scale glyphs with automatic weight compensation.
+
+	Measures reference stems before scaling, applies the transform, then uses
+	GlyphsFilterOffsetCurve with separate X/Y offsets to restore stem weights.
+
+	Parameters:
+	  glyphNames: list of glyph names (empty = all exporting glyphs)
+	  masterId: master ID (empty = all masters)
+	  width: horizontal scale factor (1.0 = no change, 0.97 = 3% narrower)
+	  height: vertical scale factor (1.0 = no change, 1.15 = 15% taller)
+	  weight: target weight factor (1.0 = maintain original stems, 0.9 = 10% thinner)
+	  proportional: if true, height follows width
+	  backup: create backup layer before modifying (default true)
+	"""
+	if not body:
+		return 400, {"error": "Body required"}
+
+	sx = float(body.get("width", 1.0))
+	sy = float(body.get("height", 1.0))
+	weight = float(body.get("weight", 1.0))
+	proportional = bool(body.get("proportional", False))
+	backup = bool(body.get("backup", True))
+	master_id = body.get("masterId", None)
+	glyph_names = body.get("glyphNames", [])
+
+	if proportional:
+		sy = sx
+
+	if sx == 1.0 and sy == 1.0 and weight == 1.0:
+		return 400, {"error": "Nothing to do — all scale factors are 1.0"}
+
+	def _run():
+		import math
+		import objc
+		from Foundation import NSAffineTransform, NSPoint
+
+		font = _require_font()
+
+		# Determine masters to process
+		if master_id:
+			masters = [font.fontMasterForId_(master_id)] if hasattr(font, 'fontMasterForId_') else [font.masters[0]]
+			masters = [m for m in masters if m is not None]
+		else:
+			masters = list(font.masters)
+
+		if not masters:
+			return {"error": "No valid masters found"}
+
+		# Determine glyphs to process
+		if not glyph_names:
+			names = [g.name for g in font.glyphs if g.export]
+		else:
+			names = list(glyph_names)
+
+		# Get offset curve filter
+		OffsetCurve = None
+		try:
+			OffsetCurve = objc.lookUpClass('GlyphsFilterOffsetCurve')
+		except:
+			pass
+
+		per_master = {}
+
+		font.disableUpdateInterface()
+		try:
+			for master in masters:
+				mid = master.id
+				mname = str(master.name)
+
+				# 1. Measure reference stems BEFORE scaling
+				ref_before = _measure_ref_stems(font, mid)
+				print(f"[SmartScale] {mname} refs before: {ref_before}")
+
+				processed = []
+				skipped = []
+				diagonal_deferred = []  # scale these AFTER OffsetCurve
+
+				# Diagonal-dominant glyphs: OffsetCurve X+Y compounds
+				# along the stroke normal, causing over-compensation.
+				# These get scaled with the effective Y factor (matching
+				# the actual xHeight change) instead of raw sy.
+				_DIAGONAL_GLYPHS = {
+					"v", "w", "x", "y", "z", "k",
+					"V", "W", "X", "Y", "Z", "K",
+				}
+
+				# Record old xHeight for diagonal correction later
+				old_xHeight = float(master.xHeight) if master.xHeight else 500.0
+
+				for gn in names:
+					glyph = font.glyphs[gn]
+					if glyph is None:
+						skipped.append(gn)
+						continue
+
+					layer = glyph.layers[mid]
+					if layer is None:
+						skipped.append(gn)
+						continue
+
+					# Skip empty layers (no paths and no components)
+					has_paths = len(layer.paths) > 0
+					has_components = len(layer.components) > 0
+					if not has_paths and not has_components:
+						skipped.append(gn)
+						continue
+
+					# Backup
+					if backup:
+						bk = layer.copy()
+						bk.name = "Pre-SmartScale " + mname
+						bk.associatedMasterId = mid
+						glyph.layers.append(bk)
+
+					# Defer diagonal glyphs — scale them after OffsetCurve
+					if gn in _DIAGONAL_GLYPHS:
+						diagonal_deferred.append(gn)
+						continue
+
+					# Store original metrics (pre-scale, to restore after OffsetCurve)
+					orig_width = float(layer.width)
+					orig_lsb = float(layer.LSB)
+					orig_rsb = float(layer.RSB)
+
+					# 2. Apply transform (non-diagonal glyphs)
+					layer.beginChanges()
+
+					t = NSAffineTransform.alloc().init()
+					t.scaleXBy_yBy_(sx, sy)
+					layer.transform_(t)
+					layer.width = round(orig_width * sx)
+
+					layer.endChanges()
+
+					processed.append({
+						"name": gn,
+						"widthBefore": orig_width,
+						"widthAfter": float(layer.width),
+						"origLSB": orig_lsb,
+						"origRSB": orig_rsb,
+					})
+
+				# 3. Calculate compensation offsets per case using THEORETICAL delta
+				# Measuring post-scale stems is unreliable at thin weights due to
+				# coordinate rounding noise. Instead, calculate the expected change:
+				#   V-stems scale by sx → need offsetX = stem * (weight - sx) / 2
+				#   H-stems scale by sy → need offsetY = stem * (weight - sy) / 2
+				offsets = {}  # case -> (offset_x, offset_y)
+				for case in ["lc", "uc"]:
+					v_b = ref_before.get(f"{case}_v")
+					h_b = ref_before.get(f"{case}_h")
+					ox = 0.0
+					oy = 0.0
+					if v_b:
+						ox = v_b * (weight - sx) / 2.0
+					if h_b:
+						oy = h_b * (weight - sy) / 2.0
+					offsets[case] = (ox, oy)
+
+				any_compensation = any(
+					abs(ox) > 0.3 or abs(oy) > 0.3
+					for ox, oy in offsets.values()
+				)
+				compensation_applied = False
+
+				if any_compensation and OffsetCurve is not None:
+					print(f"[SmartScale] {mname} offsets: lc={offsets.get('lc')}, uc={offsets.get('uc')}")
+
+					oc = OffsetCurve.alloc().init()
+
+					for info in processed:
+						gn = info["name"]
+						glyph = font.glyphs[gn]
+						layer = glyph.layers[mid]
+
+						# Pick offsets based on glyph case
+						glyph_class = _classify_glyph(glyph)
+						if glyph_class == "uppercase" or glyph_class == "figure":
+							g_offset_x, g_offset_y = offsets.get("uc", (0, 0))
+						else:
+							g_offset_x, g_offset_y = offsets.get("lc", (0, 0))
+
+						if abs(g_offset_x) < 0.3 and abs(g_offset_y) < 0.3:
+							continue
+
+						# Only compensate V-stems (X offset). H-stems scale
+						# naturally with sy, matching Tuner behavior. Applying
+						# OffsetCurve Y causes height contraction (position=0.5
+						# contracts both top and bottom edges).
+						layer.beginChanges()
+						try:
+							if abs(g_offset_x) >= 0.3:
+								oc.processLayer_withArguments_(layer, [
+									"GlyphsFilterOffsetCurve",
+									str(round(g_offset_x, 1)),
+									"0",   # no Y compensation
+									"0",   # makeStroke = no
+									"0.5"  # position = center
+								])
+						except Exception as e:
+							print(f"[SmartScale] Offset failed for {gn}: {e}")
+
+						layer.endChanges()
+
+						# Restore ORIGINAL sidebearings (pre-scale values)
+						# This preserves the designer's intended spacing.
+						# Width adjusts automatically: width = LSB + paths + RSB
+						orig_lsb = info.get("origLSB", float(layer.LSB))
+						orig_rsb = info.get("origRSB", float(layer.RSB))
+						layer.LSB = round(orig_lsb)
+						layer.RSB = round(orig_rsb)
+						info["widthAfter"] = float(layer.width)
+
+						info["offsetX"] = round(g_offset_x, 1)
+
+					compensation_applied = True
+				else:
+					# No OffsetCurve needed, but still restore original sidebearings
+					for info in processed:
+						gn = info["name"]
+						layer = font.glyphs[gn].layers[mid]
+						orig_lsb = info.get("origLSB")
+						orig_rsb = info.get("origRSB")
+						if orig_lsb is not None and orig_rsb is not None:
+							layer.LSB = round(orig_lsb)
+							layer.RSB = round(orig_rsb)
+							info["widthAfter"] = float(layer.width)
+
+				# 4.5. Scale diagonal glyphs + angle-compensated OffsetCurve
+				# Diagonals are scaled like non-diagonals (sx, sy) but use
+				# a single OffsetCurve X pass with a compensation factor
+				# based on the diagonal angle: factor = 1/cos(angle).
+				# This correctly compensates stroke weight on any diagonal.
+				if diagonal_deferred:
+					# Measure effective sy from actual xHeight change
+					effective_sy = sy
+					if sy != 1.0:
+						n_glyph = font.glyphs["n"]
+						new_xHeight = old_xHeight * sy  # fallback
+						if n_glyph:
+							n_layer = n_glyph.layers[mid]
+							if n_layer:
+								n_w = float(n_layer.width)
+								stem_top = 0.0
+								for path in n_layer.paths:
+									for node in path.nodes:
+										if node.type in ("line", "curve"):
+											if float(node.position.x) < n_w * 0.25 and float(node.position.y) > stem_top:
+												stem_top = float(node.position.y)
+								if stem_top > 0:
+									new_xHeight = stem_top
+						effective_sy = new_xHeight / old_xHeight
+						print(f"[SmartScale] {mname} diagonal: effective_sy={effective_sy:.4f} (xH {old_xHeight:.0f} -> {new_xHeight:.0f})")
+
+					for gn in diagonal_deferred:
+						glyph = font.glyphs[gn]
+						layer = glyph.layers[mid]
+						orig_width = float(layer.width)
+						orig_lsb_d = float(layer.LSB)
+						orig_rsb_d = float(layer.RSB)
+
+						# Ascender diags (k/K): use sy=1.0 if capHeight unchanged
+						is_ascender_diag = gn in ("k", "K")
+						this_sy = effective_sy
+						if is_ascender_diag:
+							this_sy = 1.0 if abs(sy - 1.0) < 0.001 else effective_sy
+
+						# Scale
+						layer.beginChanges()
+						t = NSAffineTransform.alloc().init()
+						t.scaleXBy_yBy_(sx, this_sy)
+						layer.transform_(t)
+						layer.width = round(orig_width * sx)
+						layer.endChanges()
+
+						# Measure diagonal angle for compensation factor
+						diag_angle = _measure_diagonal_angle(layer)
+						diag_factor = 1.0
+						if diag_angle is not None:
+							# factor = 1/cos(angle from vertical)
+							diag_factor = 1.0 / max(0.5, math.cos(math.radians(diag_angle)))
+
+						# Pick case-appropriate V-stem reference
+						glyph_class = _classify_glyph(glyph)
+						if glyph_class == "uppercase":
+							base_offset_x = offsets.get("uc", (0, 0))[0]
+						else:
+							base_offset_x = offsets.get("lc", (0, 0))[0]
+
+						# Apply single OffsetCurve X pass with diagonal factor
+						diag_offset_x = base_offset_x * diag_factor
+						if abs(diag_offset_x) >= 0.3 and OffsetCurve is not None:
+							oc = OffsetCurve.alloc().init()
+							oc.processLayer_withArguments_(layer, [
+								"GlyphsFilterOffsetCurve",
+								str(round(diag_offset_x, 2)),
+								"0", "0", "0.5"
+							])
+							print(f"[SmartScale] {gn}: angle={diag_angle:.1f}° factor={diag_factor:.3f} offsetX={diag_offset_x:.1f}")
+
+						# Restore original sidebearings (pre-scale)
+						layer.LSB = round(orig_lsb_d)
+						layer.RSB = round(orig_rsb_d)
+
+						processed.append({
+							"name": gn,
+							"widthBefore": orig_width,
+							"widthAfter": float(layer.width),
+							"effectiveSy": round(this_sy, 4),
+							"diagAngle": round(diag_angle, 1) if diag_angle else None,
+							"diagFactor": round(diag_factor, 3),
+							"diagOffsetX": round(diag_offset_x, 1),
+						})
+
+				# 5. Round all coordinates
+				for info in processed:
+					gn = info["name"]
+					layer = font.glyphs[gn].layers[mid]
+					for path in layer.paths:
+						for node in path.nodes:
+							node.position = NSPoint(
+								round(float(node.position.x)),
+								round(float(node.position.y))
+							)
+
+				# 6. Update xHeight metric if LC was scaled vertically
+				if sy != 1.0:
+					n_glyph = font.glyphs["n"]
+					if n_glyph:
+						n_layer = n_glyph.layers[mid]
+						if n_layer:
+							# xHeight = top of LEFT STEM (flat), not arch
+							# The arch overshoots xHeight by ~10-15u
+							n_w = float(n_layer.width)
+							stem_top = 0.0
+							for path in n_layer.paths:
+								for node in path.nodes:
+									if node.type in ("line", "curve"):
+										nx = float(node.position.x)
+										ny = float(node.position.y)
+										if nx < n_w * 0.25 and ny > stem_top:
+											stem_top = ny
+							if stem_top > 0:
+								old_xh = master.xHeight
+								master.xHeight = int(round(stem_top))
+								print(f"[SmartScale] {mname}: xHeight {old_xh} -> {master.xHeight}")
+
+				# 7. Measure refs after compensation to report final state
+				ref_final = _measure_ref_stems(font, mid)
+
+				per_master[mid] = {
+					"masterName": mname,
+					"refBefore": ref_before,
+					"refFinal": ref_final,
+					"compensationApplied": compensation_applied,
+					"offsets": {k: {"x": round(v[0], 1), "y": round(v[1], 1)} for k, v in offsets.items()},
+					"processed": len(processed),
+					"skipped": len(skipped),
+					"glyphs": processed[:20],  # limit response size
+				}
+
+		finally:
+			font.enableUpdateInterface()
+
+		return {
+			"ok": True,
+			"params": {
+				"width": sx,
+				"height": sy,
+				"weight": weight,
+				"proportional": proportional,
+			},
+			"masters": per_master,
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 400, result
+	return 200, result
+
+
+_AUTO_KERN_CRITICAL = [
+	("A","V"),("A","W"),("A","T"),("A","Y"),("A","C"),("A","G"),("A","O"),("A","Q"),("A","U"),
+	("F","A"),("F","a"),("F","e"),("F","o"),
+	("L","T"),("L","V"),("L","W"),("L","Y"),
+	("P","A"),("P","a"),("P","e"),("P","o"),("P","period"),("P","comma"),
+	("T","A"),("T","a"),("T","e"),("T","i"),("T","o"),("T","r"),("T","u"),("T","w"),("T","y"),("T","hyphen"),("T","period"),("T","comma"),
+	("V","A"),("V","a"),("V","e"),("V","o"),("V","i"),("V","u"),
+	("W","A"),("W","a"),("W","e"),("W","o"),("W","i"),
+	("Y","A"),("Y","a"),("Y","e"),("Y","i"),("Y","o"),("Y","u"),("Y","hyphen"),("Y","period"),("Y","comma"),
+	("f","a"),("f","e"),("f","i"),("f","o"),
+	("r","a"),("r","e"),("r","o"),("r","period"),("r","comma"),
+	("v","a"),("v","e"),("v","o"),
+	("w","a"),("w","e"),("w","o"),
+	("y","a"),("y","e"),("y","o"),("y","period"),("y","comma"),
+	("g","y"),("o","y"),("q","u"),
+]
+
+
+def _optical_weight(y, x_height, factor=1.25):
+	"""Trapezoidal optical weight at height y (MekkaBlue/HT LetterSpacer).
+	Full weight baseline→xHeight, linear taper in descender/ascender zones."""
+	if x_height <= 0:
+		return factor
+	if 0 <= y <= x_height:
+		return factor
+	elif y < 0:
+		t = 1.0 + (2.0 * y / x_height)
+		return max(0.0, t) * factor
+	else:
+		t = 1.0 - (y - x_height) / x_height
+		return max(0.0, t) * factor
+
+
+def _gap_at_height(left_layer, right_layer, y):
+	"""Measure the gap between two layers at a given y height.
+	Returns (rsb_left, lsb_right) or None if either has no ink."""
+	from Foundation import NSPoint
+	# RSB of left layer
+	p1 = NSPoint(-50, y)
+	p2 = NSPoint(float(left_layer.width) + 50, y)
+	raw = left_layer.intersectionsBetweenPoints(p1, p2)
+	if not raw or len(raw) < 2:
+		return None
+	xs = sorted(float(p.x) for p in raw)
+	rightmost = xs[-2] if len(xs) > 2 else xs[-1]  # skip endpoint
+	# Filter: only points within the glyph bounds
+	ink_xs = [x for x in xs if -1 < x < float(left_layer.width) + 1]
+	if not ink_xs:
+		return None
+	rsb = float(left_layer.width) - max(ink_xs)
+
+	# LSB of right layer
+	p1r = NSPoint(-50, y)
+	p2r = NSPoint(float(right_layer.width) + 50, y)
+	raw_r = right_layer.intersectionsBetweenPoints(p1r, p2r)
+	if not raw_r or len(raw_r) < 2:
+		return None
+	xs_r = sorted(float(p.x) for p in raw_r)
+	ink_xs_r = [x for x in xs_r if -1 < x < float(right_layer.width) + 1]
+	if not ink_xs_r:
+		return None
+	lsb = min(ink_xs_r)
+
+	return rsb, lsb
+
+
+def _calculate_optical_kern(left_layer, right_layer, target_area, step, depth, x_height, factor=1.25, left_bounds=None, right_bounds=None):
+	"""Calculate optimal kern value for a glyph pair using optical area method.
+	Pass left_bounds/right_bounds from original layers if using decomposed copies.
+	Returns int kern value or None."""
+	lb = left_bounds or left_layer.bounds
+	rb = right_bounds or right_layer.bounds
+	if not lb or not rb or lb.size.height == 0 or rb.size.height == 0:
+		return None
+
+	bottom_y = max(int(lb.origin.y), int(rb.origin.y))
+	top_y = min(int(lb.origin.y + lb.size.height), int(rb.origin.y + rb.size.height))
+	if top_y <= bottom_y:
+		return 0
+
+	weighted_gap_sum = 0.0
+	total_weight = 0.0
+
+	y = bottom_y
+	while y <= top_y:
+		gap = _gap_at_height(left_layer, right_layer, float(y))
+		if gap is not None:
+			rsb, lsb = gap
+			rsb_c = min(rsb, depth)
+			lsb_c = min(lsb, depth)
+			w = _optical_weight(float(y), float(x_height), factor)
+			weighted_gap_sum += w * (rsb_c + lsb_c)
+			total_weight += w
+		y += step
+
+	if total_weight == 0:
+		return 0
+
+	kern = (target_area / step - weighted_gap_sum) / total_weight
+	return int(round(kern))
+
+
+def _measure_pair_area(left_layer, right_layer, step, depth, x_height, factor=1.25, left_bounds=None, right_bounds=None):
+	"""Measure the current optical gap area between two layers (for calibration)."""
+	lb = left_bounds or left_layer.bounds
+	rb = right_bounds or right_layer.bounds
+	if not lb or not rb or lb.size.height == 0 or rb.size.height == 0:
+		return None
+
+	bottom_y = max(int(lb.origin.y), int(rb.origin.y))
+	top_y = min(int(lb.origin.y + lb.size.height), int(rb.origin.y + rb.size.height))
+	if top_y <= bottom_y:
+		return None
+
+	weighted_gap_sum = 0.0
+	y = bottom_y
+	while y <= top_y:
+		gap = _gap_at_height(left_layer, right_layer, float(y))
+		if gap is not None:
+			rsb, lsb = gap
+			rsb_c = min(rsb, depth)
+			lsb_c = min(lsb, depth)
+			w = _optical_weight(float(y), float(x_height), factor)
+			weighted_gap_sum += w * (rsb_c + lsb_c)
+		y += step
+
+	return weighted_gap_sum * step
+
+
+@route("POST", "/api/font/kerning/auto")
+def handle_auto_kern(bridge, body=None, **kwargs):
+	"""Auto-kern glyph pairs using optical gap analysis (MB LetterKerner algorithm)."""
+	if not body:
+		body = {}
+
+	pairs_mode = str(body.get("pairs", "critical"))
+	pairs_list = body.get("pairsList", [])
+	user_area = body.get("area", None)
+	step = int(body.get("step", 5))
+	depth = int(body.get("depth", 200))
+	factor = float(body.get("factor", 1.25))
+	rounding = int(body.get("rounding", 5))
+	threshold = int(body.get("threshold", 3))
+	use_groups = bool(body.get("useGroups", True))
+	overwrite = bool(body.get("overwrite", False))
+	dry_run = bool(body.get("dryRun", False))
+	master_id = body.get("masterId", None)
+
+	def _run():
+		from GlyphsApp import Glyphs
+		font = _require_font()
+
+		if master_id:
+			masters = [m for m in font.masters if str(m.id) == master_id]
+			if not masters:
+				raise ValueError(f"Master '{master_id}' not found")
+		else:
+			masters = list(font.masters)
+
+		# ── Generate pair list ─────────────────────────────────
+		if pairs_mode == "explicit":
+			glyph_pairs = [(str(p[0]), str(p[1])) for p in pairs_list if len(p) >= 2]
+		elif pairs_mode == "critical":
+			glyph_pairs = [(l, r) for l, r in _AUTO_KERN_CRITICAL
+				if font.glyphs[l] and font.glyphs[r]]
+		elif pairs_mode == "auto":
+			# Generate representative pairs per kerning group combination
+			export_letters = [g for g in font.glyphs
+				if g.export and (g.category or "") in ("Letter", "Number", "Punctuation")]
+			# Group by kerning keys
+			left_groups = {}  # rightKerningGroup → representative glyph
+			right_groups = {}  # leftKerningGroup → representative glyph
+			for g in export_letters:
+				rkg = str(g.rightKerningGroup or g.name)
+				lkg = str(g.leftKerningGroup or g.name)
+				if rkg not in left_groups or len(g.name) < len(left_groups[rkg]):
+					left_groups[rkg] = g.name
+				if lkg not in right_groups or len(g.name) < len(right_groups[lkg]):
+					right_groups[lkg] = g.name
+			# Cross all left × right group representatives
+			glyph_pairs = []
+			for l_name in left_groups.values():
+				for r_name in right_groups.values():
+					glyph_pairs.append((l_name, r_name))
+			# Cap to avoid timeout
+			if len(glyph_pairs) > 800:
+				glyph_pairs = glyph_pairs[:800]
+		else:
+			raise ValueError(f"Unknown pairs mode: {pairs_mode}")
+
+		if not glyph_pairs:
+			return {"ok": True, "dryRun": dry_run, "masters": {},
+				"message": "No valid pairs to process"}
+
+		per_master = {}
+		font.disableUpdateInterface()
+		try:
+			for master in masters:
+				mid = str(master.id)
+				mname = str(master.name)
+				x_height = float(master.xHeight)
+
+				# ── Calibration ────────────────────────────────
+				calibration = {}
+				lc_area = user_area
+				uc_area = user_area
+
+				if user_area is None:
+					# Calibrate from nn (LC) and HH (UC)
+					# _measure_pair_area returns weightedGapSum * step (= the "area")
+					# _calculate_optical_kern expects target_area in this form
+					# (it internally does target_area / step to recover weightedGapSum)
+					n_g = font.glyphs["n"]
+					h_g = font.glyphs["H"]
+					if n_g:
+						nl = n_g.layers[mid]
+						a = _measure_pair_area(nl, nl, step, depth, x_height, factor)
+						if a is not None:
+							lc_area = a  # pass raw area — _calculate_optical_kern divides by step
+							calibration["lc_area"] = round(a, 1)
+							calibration["lc_ref"] = "nn"
+					if h_g:
+						hl = h_g.layers[mid]
+						a = _measure_pair_area(hl, hl, step, depth, x_height, factor)
+						if a is not None:
+							uc_area = a  # pass raw area
+							calibration["uc_area"] = round(a, 1)
+							calibration["uc_ref"] = "HH"
+
+					if lc_area is None and uc_area is not None:
+						lc_area = uc_area
+					elif uc_area is None and lc_area is not None:
+						uc_area = lc_area
+
+					# Mixed: geometric mean
+					if lc_area is not None and uc_area is not None:
+						import math
+						calibration["mixed_area"] = round(
+							math.sqrt(calibration.get("lc_area", 0) * calibration.get("uc_area", 0)), 1)
+
+				if lc_area is None and uc_area is None:
+					per_master[mid] = {"masterName": mname,
+						"error": "Could not calibrate — n and H glyphs missing"}
+					continue
+
+				# ── Process pairs ──────────────────────────────
+				results = []
+				group_done = set()
+				upm = int(font.upm)
+				max_kern = upm // 3
+
+				for left_name, right_name in glyph_pairs:
+					lg = font.glyphs[left_name]
+					rg = font.glyphs[right_name]
+					if not lg or not rg:
+						continue
+
+					# Kerning keys
+					if use_groups:
+						l_key = "@MMK_L_" + str(lg.rightKerningGroup) if lg.rightKerningGroup else lg.name
+						r_key = "@MMK_R_" + str(rg.leftKerningGroup) if rg.leftKerningGroup else rg.name
+					else:
+						l_key = lg.name
+						r_key = rg.name
+
+					# Deduplicate by group pair
+					pair_id = (l_key, r_key)
+					if pair_id in group_done:
+						continue
+					group_done.add(pair_id)
+
+					# Check existing kerning
+					if not overwrite:
+						kern_dict = font.kerning.get(mid, {})
+						if kern_dict and l_key in kern_dict and r_key in kern_dict.get(l_key, {}):
+							results.append({"left": left_name, "right": right_name,
+								"leftKey": l_key, "rightKey": r_key,
+								"value": 0, "rawValue": 0,
+								"applied": False, "reason": "existing"})
+							continue
+
+					# Get layers
+					ll = lg.layers[mid]
+					rl = rg.layers[mid]
+					if not ll.paths and not ll.components:
+						continue
+					if not rl.paths and not rl.components:
+						continue
+
+					# Save original bounds before decomposing (decomposed copies lose parent → bounds=0)
+					ll_bounds = ll.bounds
+					rl_bounds = rl.bounds
+
+					# Use decomposed copies for intersection measurement
+					ll_m = ll.copyDecomposedLayer()
+					rl_m = rl.copyDecomposedLayer()
+
+					# Pick target area based on case
+					lc = _classify_glyph(lg)
+					rc = _classify_glyph(rg)
+					if lc == "uppercase" and rc == "uppercase":
+						tgt = uc_area
+					elif lc == "lowercase" and rc == "lowercase":
+						tgt = lc_area
+					else:
+						# Mixed: geometric mean
+						if lc_area is not None and uc_area is not None:
+							import math
+							tgt = math.sqrt(lc_area * uc_area)
+						else:
+							tgt = lc_area or uc_area
+
+					if tgt is None:
+						continue
+
+					# Calculate kern (pass original bounds)
+					raw = _calculate_optical_kern(ll_m, rl_m, tgt, step, depth, x_height, factor,
+						left_bounds=ll_bounds, right_bounds=rl_bounds)
+					if raw is None:
+						results.append({"left": left_name, "right": right_name,
+							"leftKey": l_key, "rightKey": r_key,
+							"value": 0, "rawValue": 0,
+							"applied": False, "reason": "unmeasurable"})
+						continue
+
+					# Clamp
+					raw = max(-max_kern, min(max_kern, raw))
+
+					# Round
+					if rounding > 1:
+						rounded = rounding * round(raw / rounding)
+					else:
+						rounded = raw
+
+					# Threshold
+					if abs(rounded) < threshold:
+						results.append({"left": left_name, "right": right_name,
+							"leftKey": l_key, "rightKey": r_key,
+							"value": rounded, "rawValue": round(float(raw), 1),
+							"applied": False, "reason": "below_threshold"})
+						continue
+
+					# Apply
+					if not dry_run:
+						font.setKerningForPair(mid, l_key, r_key, float(rounded))
+
+					results.append({"left": left_name, "right": right_name,
+						"leftKey": l_key, "rightKey": r_key,
+						"value": int(rounded), "rawValue": round(float(raw), 1),
+						"applied": not dry_run, "reason": None})
+
+				# ── Summary ────────────────────────────────────
+				kerned = [r for r in results if r.get("applied") or (dry_run and r.get("reason") is None)]
+				kern_vals = [r["value"] for r in kerned] if kerned else [0]
+
+				per_master[mid] = {
+					"masterName": mname,
+					"calibration": calibration,
+					"pairsProcessed": len(results),
+					"pairsKerned": len(kerned),
+					"pairsSkipped": len(results) - len(kerned),
+					"results": results[:300],
+					"summary": {
+						"negative": sum(1 for v in kern_vals if v < 0),
+						"positive": sum(1 for v in kern_vals if v > 0),
+						"zero": sum(1 for v in kern_vals if v == 0),
+						"minValue": min(kern_vals) if kern_vals else 0,
+						"maxValue": max(kern_vals) if kern_vals else 0,
+						"avgValue": round(sum(kern_vals) / len(kern_vals), 1) if kern_vals else 0,
+					},
+				}
+		finally:
+			font.enableUpdateInterface()
+
+		return {
+			"ok": True, "dryRun": dry_run,
+			"params": {"step": step, "depth": depth, "rounding": rounding,
+				"threshold": threshold, "useGroups": use_groups, "overwrite": overwrite},
+			"masters": per_master,
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 500, {"ok": False, "error": result["error"]}
+	return 200, result
+
+
+_PS_NAME_RE = __import__("re").compile(r'^[A-Za-z_.][A-Za-z0-9_.]*$')
+
+
+_ESSENTIAL_GLYPHS = [
+	("NULL", ".null"), ("CR", "nonmarkingreturn"), ("nbspace",),
+	("Euro",), ("softhyphen",),
+]
+
+
+_STANDARD_WEIGHT_CLASSES = {100, 200, 300, 400, 500, 600, 700, 800, 900}
+
+
+_CRITICAL_PAIRS_PROD = [
+	("A","V"),("A","W"),("A","T"),("A","Y"),("A","G"),("A","O"),("A","Q"),
+	("F","A"),("F","O"),("L","T"),("L","V"),("L","Y"),("O","A"),("P","A"),
+	("T","A"),("T","O"),("V","A"),("V","O"),("W","A"),("W","O"),("Y","A"),("Y","O"),
+	("A","v"),("A","w"),("F","a"),("F","e"),("F","o"),("T","a"),("T","e"),
+	("T","i"),("T","o"),("T","r"),("T","u"),("T","w"),("V","a"),("V","e"),
+	("V","o"),("W","a"),("W","e"),("Y","a"),("Y","e"),("Y","o"),
+	("f","a"),("f","e"),("f","i"),("f","o"),("r","v"),("r","y"),
+	("v","a"),("v","e"),("v","o"),("w","a"),("w","e"),("w","o"),
+	("y","a"),("y","e"),("y","o"),
+]
+
+
+@route("POST", "/api/font/production/review")
+def handle_production_review(bridge, body=None, **kwargs):
+	"""Run a comprehensive production readiness review on the font.
+
+	Checks metadata, vertical metrics, glyph coverage, master compatibility,
+	outline quality, spacing, kerning, and variable font readiness.
+	Returns results grouped by severity: critical, warning, info.
+	"""
+	def _run():
+		import re, math
+		from GlyphsApp import Glyphs
+		font = _require_font()
+
+		checks = []
+		def _check(name, severity, passed, message, details=None):
+			checks.append({"name": name, "severity": severity,
+				"passed": passed, "message": message, "details": details})
+
+		masters = list(font.masters)
+		master_ids = [str(m.id) for m in masters]
+
+		# ── Pre-compute shared data ──────────────────────────────────
+		export_glyphs = [g for g in font.glyphs if g.export]
+		unicode_map = {}
+		component_refs = set()
+		for g in export_glyphs:
+			if g.unicode:
+				unicode_map.setdefault(g.unicode, []).append(g.name)
+			for m in masters:
+				for c in g.layers[m.id].components:
+					component_refs.add(str(c.componentName))
+
+		# ══════════════════════════════════════════════════════════════
+		# CRITICAL CHECKS
+		# ══════════════════════════════════════════════════════════════
+
+		# 1. Family name
+		fn = font.familyName or ""
+		_check("family_name", "critical",
+			bool(fn) and fn not in ("New Font", "Untitled"),
+			f"Family name: '{fn}'" if fn else "Family name is empty")
+
+		# 2. .notdef exists
+		notdef = font.glyphs[".notdef"]
+		has_notdef = notdef is not None
+		_check("notdef_exists", "critical", has_notdef,
+			".notdef glyph exists" if has_notdef else ".notdef glyph is MISSING")
+
+		# 3. space glyph
+		space = font.glyphs["space"]
+		space_ok = False
+		space_msg = "space glyph missing"
+		if space:
+			if space.unicode != "0020":
+				space_msg = f"space exists but unicode={space.unicode} (expected 0020)"
+			else:
+				bad_w = [m.name for m in masters if space.layers[m.id].width <= 0]
+				if bad_w:
+					space_msg = f"space has zero/negative width in: {', '.join(bad_w)}"
+				else:
+					space_ok = True
+					space_msg = "space glyph OK (unicode=0020, width>0)"
+		_check("space_glyph", "critical", space_ok, space_msg)
+
+		# 4. Duplicate unicodes
+		dupes = {u: names for u, names in unicode_map.items() if len(names) > 1}
+		_check("duplicate_unicodes", "critical", len(dupes) == 0,
+			f"{len(dupes)} duplicate unicode assignments" if dupes else "No duplicate unicodes",
+			{f"U+{u}": names for u, names in list(dupes.items())[:20]} if dupes else None)
+
+		# 5. Duplicate glyph names
+		name_counts = {}
+		for g in font.glyphs:
+			name_counts[g.name] = name_counts.get(g.name, 0) + 1
+		dup_names = {n: c for n, c in name_counts.items() if c > 1}
+		_check("duplicate_names", "critical", len(dup_names) == 0,
+			f"{len(dup_names)} duplicate glyph names" if dup_names else "No duplicate glyph names",
+			dup_names if dup_names else None)
+
+		# 6. Master compatibility
+		incompat = []
+		for g in export_glyphs:
+			if len(masters) < 2:
+				break
+			layers = [g.layers[mid] for mid in master_ids]
+			p_counts = [len(l.paths) for l in layers]
+			c_counts = [len(l.components) for l in layers]
+			if len(set(p_counts)) > 1:
+				incompat.append(f"{g.name} (paths: {'/'.join(map(str,p_counts))})")
+				continue
+			if len(set(c_counts)) > 1:
+				incompat.append(f"{g.name} (components: {'/'.join(map(str,c_counts))})")
+				continue
+			for pi in range(p_counts[0]):
+				n_counts = [len(layers[mi].paths[pi].nodes) for mi in range(len(masters))]
+				if len(set(n_counts)) > 1:
+					incompat.append(f"{g.name} path{pi} (nodes: {'/'.join(map(str,n_counts))})")
+					break
+		_check("master_compatibility", "critical", len(incompat) == 0,
+			f"{len(incompat)} incompatible glyphs" if incompat else "All glyphs compatible",
+			incompat[:50] if incompat else None)
+
+		# 7. Vertical metrics defined
+		vmetrics_ok = True
+		vmetrics_missing = []
+		for m in masters:
+			required = ["typoAscender", "typoDescender", "winAscent", "winDescent",
+						"hheaAscender", "hheaDescender"]
+			for key in required:
+				val = None
+				for p in m.customParameters:
+					if p.name == key:
+						val = p.value
+						break
+				if val is None:
+					# Also check font-level
+					for p in font.customParameters:
+						if p.name == key:
+							val = p.value
+							break
+				if val is None:
+					vmetrics_missing.append(f"{m.name}: {key}")
+					vmetrics_ok = False
+		_check("vertical_metrics", "critical", vmetrics_ok,
+			"All vertical metrics defined" if vmetrics_ok else f"Missing vertical metrics",
+			vmetrics_missing[:20] if vmetrics_missing else None)
+
+		# 8. Open paths
+		open_path_glyphs = []
+		for g in export_glyphs:
+			for m in masters:
+				for p in g.layers[m.id].paths:
+					if not p.closed:
+						open_path_glyphs.append(g.name)
+						break
+				else:
+					continue
+				break
+		_check("open_paths", "critical", len(open_path_glyphs) == 0,
+			f"{len(open_path_glyphs)} glyphs with open paths" if open_path_glyphs else "No open paths",
+			open_path_glyphs[:50] if open_path_glyphs else None)
+
+		# 9. Valid glyph names
+		bad_names = []
+		for g in export_glyphs:
+			if not _PS_NAME_RE.match(g.name):
+				bad_names.append(f"{g.name} (invalid characters)")
+			elif len(g.name) > 63:
+				bad_names.append(f"{g.name} (>{63} chars)")
+		_check("valid_glyph_names", "critical", len(bad_names) == 0,
+			f"{len(bad_names)} invalid glyph names" if bad_names else "All glyph names valid",
+			bad_names[:30] if bad_names else None)
+
+		# 10. Missing component references
+		missing_comps = []
+		for g in export_glyphs:
+			for m in masters:
+				for c in g.layers[m.id].components:
+					cn = str(c.componentName)
+					if font.glyphs[cn] is None:
+						missing_comps.append(f"{g.name} → {cn}")
+		missing_comps = list(set(missing_comps))
+		_check("missing_components", "critical", len(missing_comps) == 0,
+			f"{len(missing_comps)} missing component references" if missing_comps else "All components valid",
+			missing_comps[:30] if missing_comps else None)
+
+		# 11. Alignment zones
+		zones_ok = True
+		zones_issues = []
+		for m in masters:
+			zones = list(m.alignmentZones) if m.alignmentZones else []
+			if not zones:
+				zones_issues.append(f"{m.name}: no alignment zones defined")
+				zones_ok = False
+				continue
+			# Check overlaps
+			sorted_z = sorted([(int(z.position), int(z.size)) for z in zones])
+			for i in range(len(sorted_z) - 1):
+				p1, s1 = sorted_z[i]
+				p2, s2 = sorted_z[i+1]
+				top1 = p1 + abs(s1)
+				if top1 > p2 and s1 != 0:
+					zones_issues.append(f"{m.name}: zones overlap at {p1}+{s1} and {p2}+{s2}")
+					zones_ok = False
+		_check("alignment_zones", "critical", zones_ok,
+			"Alignment zones OK" if zones_ok else "Alignment zone issues",
+			zones_issues if zones_issues else None)
+
+		# ══════════════════════════════════════════════════════════════
+		# WARNING CHECKS
+		# ══════════════════════════════════════════════════════════════
+
+		# 13. Metadata
+		meta_missing = []
+		if not font.copyright: meta_missing.append("copyright")
+		if not font.designer: meta_missing.append("designer")
+		license_val = None
+		for p in font.customParameters:
+			if p.name == "license":
+				license_val = p.value
+		if not license_val: meta_missing.append("license")
+		_check("metadata", "warning", len(meta_missing) == 0,
+			"Metadata complete" if not meta_missing else f"Missing: {', '.join(meta_missing)}")
+
+		# 14. Version
+		ver_ok = font.versionMajor >= 1
+		_check("version", "warning", ver_ok,
+			f"Version {font.versionMajor}.{font.versionMinor:03d}" if ver_ok else
+			f"Version {font.versionMajor}.{font.versionMinor:03d} — should be >= 1.000")
+
+		# 15. Essential glyphs
+		missing_essential = []
+		for names in _ESSENTIAL_GLYPHS:
+			found = any(font.glyphs[n] is not None for n in names)
+			if not found:
+				missing_essential.append(names[0])
+		_check("essential_glyphs", "warning", len(missing_essential) == 0,
+			f"Missing: {', '.join(missing_essential)}" if missing_essential else "All essential glyphs present")
+
+		# 16. .notdef has outlines
+		if has_notdef:
+			notdef_outlines = any(len(notdef.layers[m.id].paths) > 0 for m in masters)
+			_check("notdef_outlines", "warning", notdef_outlines,
+				".notdef has outlines" if notdef_outlines else ".notdef is empty (should have outlines)")
+
+		# 17. Alignment zone sizes
+		zero_zones = []
+		for m in masters:
+			for z in (m.alignmentZones or []):
+				if int(z.size) == 0:
+					zero_zones.append(f"{m.name}: pos={int(z.position)} size=0")
+		_check("zone_overshoots", "warning", len(zero_zones) == 0,
+			f"{len(zero_zones)} zones with size=0 (no overshoot for hinting)" if zero_zones else "All zones have overshoot",
+			zero_zones if zero_zones else None)
+
+		# 18. Use Typo Metrics
+		use_typo = False
+		for p in font.customParameters:
+			if p.name == "Use Typo Metrics":
+				use_typo = bool(p.value)
+				break
+		_check("use_typo_metrics", "warning", use_typo,
+			"Use Typo Metrics is enabled" if use_typo else "Use Typo Metrics NOT set (recommended for cross-platform consistency)")
+
+		# 19. Consistent typo/hhea
+		vmetrics_consistent = True
+		vmetrics_diff = []
+		for m in masters:
+			vals = {}
+			for p in m.customParameters:
+				if p.name in ("typoAscender","typoDescender","hheaAscender","hheaDescender"):
+					vals[p.name] = p.value
+			if vals.get("typoAscender") and vals.get("hheaAscender"):
+				if vals["typoAscender"] != vals["hheaAscender"]:
+					vmetrics_diff.append(f"{m.name}: typoAsc={vals['typoAscender']} ≠ hheaAsc={vals['hheaAscender']}")
+					vmetrics_consistent = False
+			if vals.get("typoDescender") and vals.get("hheaDescender"):
+				if vals["typoDescender"] != vals["hheaDescender"]:
+					vmetrics_diff.append(f"{m.name}: typoDesc={vals['typoDescender']} ≠ hheaDesc={vals['hheaDescender']}")
+					vmetrics_consistent = False
+		_check("typo_hhea_match", "warning", vmetrics_consistent,
+			"typo and hhea metrics match" if vmetrics_consistent else "typo/hhea mismatch",
+			vmetrics_diff if vmetrics_diff else None)
+
+		# 20. winAscent/winDescent coverage
+		win_vals = {}
+		for m in masters:
+			for p in m.customParameters:
+				if p.name == "winAscent": win_vals.setdefault(m.name, {})["winA"] = int(p.value)
+				if p.name == "winDescent": win_vals.setdefault(m.name, {})["winD"] = int(p.value)
+		# Sample glyph bounds
+		max_y, min_y = 0, 0
+		sampled = 0
+		for g in export_glyphs[:300]:
+			for m in masters:
+				b = g.layers[m.id].bounds
+				if b:
+					top = b.origin.y + b.size.height
+					bot = b.origin.y
+					if top > max_y: max_y = int(top)
+					if bot < min_y: min_y = int(bot)
+					sampled += 1
+		win_issues = []
+		for mname, wv in win_vals.items():
+			if "winA" in wv and wv["winA"] < max_y:
+				win_issues.append(f"{mname}: winAscent={wv['winA']} < max glyph y={max_y}")
+			if "winD" in wv and wv["winD"] < abs(min_y):
+				win_issues.append(f"{mname}: winDescent={wv['winD']} < |min glyph y|={abs(min_y)}")
+		_check("win_metrics_coverage", "warning", len(win_issues) == 0,
+			"winAscent/winDescent cover glyph extremes" if not win_issues else "win metrics may clip",
+			win_issues if win_issues else None)
+
+		# 21. Kerning group orphans
+		orphan_both = []
+		orphan_left = []
+		orphan_right = []
+		for g in export_glyphs:
+			if (g.category or "") != "Letter":
+				continue
+			has_l = bool(g.leftKerningGroup)
+			has_r = bool(g.rightKerningGroup)
+			if not has_l and not has_r:
+				orphan_both.append(g.name)
+			elif not has_l:
+				orphan_left.append(g.name)
+			elif not has_r:
+				orphan_right.append(g.name)
+		total_orphans = len(orphan_both) + len(orphan_left) + len(orphan_right)
+		_check("kerning_groups", "warning", total_orphans == 0,
+			f"{total_orphans} letter glyphs without kerning groups" if total_orphans else "All letters have kerning groups",
+			{"missing_both": orphan_both[:20], "missing_left": orphan_left[:10], "missing_right": orphan_right[:10]} if total_orphans else None)
+
+		# 22. Cross-master kerning
+		if len(masters) >= 2:
+			kern_sets = {}
+			for m in masters:
+				pairs = set()
+				kern = font.kerning.get(m.id, {})
+				if kern:
+					for left, rights in kern.items():
+						for right in rights:
+							pairs.add((str(left), str(right)))
+				kern_sets[m.name] = pairs
+			all_pairs = set()
+			for s in kern_sets.values():
+				all_pairs |= s
+			cross_missing = 0
+			for pair in all_pairs:
+				present_in = [mn for mn, s in kern_sets.items() if pair in s]
+				if len(present_in) < len(masters):
+					cross_missing += 1
+			_check("cross_master_kerning", "warning", cross_missing == 0,
+				f"{cross_missing} pairs missing in some masters (interpolation jumps)" if cross_missing else "Kerning consistent across masters")
+
+		# 23. Critical kern pairs
+		total_critical = len(_CRITICAL_PAIRS_PROD)
+		covered = 0
+		missing_critical = []
+		for left, right in _CRITICAL_PAIRS_PROD:
+			found = False
+			for m in masters:
+				kern = font.kerning.get(m.id, {})
+				if not kern:
+					continue
+				gl = font.glyphs[left]
+				gr = font.glyphs[right]
+				if not gl or not gr:
+					found = True  # glyph doesn't exist, skip
+					break
+				# Check direct pair and group pair
+				l_group = f"@MMK_L_{gl.rightKerningGroup}" if gl.rightKerningGroup else None
+				r_group = f"@MMK_R_{gr.leftKerningGroup}" if gr.leftKerningGroup else None
+				l_id = gl.id if hasattr(gl, 'id') else gl.name
+				for lk in [l_id, l_group]:
+					if lk and lk in kern:
+						for rk in [gr.id if hasattr(gr, 'id') else gr.name, r_group]:
+							if rk and rk in kern[lk]:
+								found = True
+								break
+					if found:
+						break
+				if found:
+					break
+			if found:
+				covered += 1
+			else:
+				missing_critical.append(f"{left}{right}")
+		pct = round(covered / total_critical * 100, 1) if total_critical else 0
+		_check("critical_kern_pairs", "warning", pct >= 80,
+			f"{pct}% critical pairs covered ({covered}/{total_critical})" ,
+			{"missing": missing_critical[:30]} if missing_critical else None)
+
+		# 24. Features exist
+		has_features = len(font.features) > 0 if font.features else False
+		_check("features_exist", "warning", has_features,
+			f"{len(font.features)} features defined" if has_features else "No OpenType features defined")
+
+		# 25. Instance weight classes
+		bad_wc = []
+		for inst in font.instances:
+			if inst.weightClass not in _STANDARD_WEIGHT_CLASSES:
+				bad_wc.append(f"{inst.name}: weightClass={inst.weightClass}")
+		_check("weight_classes", "warning", len(bad_wc) == 0,
+			"All instance weight classes standard" if not bad_wc else f"{len(bad_wc)} non-standard weight classes",
+			bad_wc if bad_wc else None)
+
+		# 26. Style linking
+		link_issues = []
+		for inst in font.instances:
+			if inst.isBold and not inst.linkStyle:
+				link_issues.append(f"{inst.name}: isBold but no linkStyle")
+		_check("style_linking", "warning", len(link_issues) == 0,
+			"Style linking OK" if not link_issues else f"{len(link_issues)} style linking issues",
+			link_issues if link_issues else None)
+
+		# 27. nbspace width = space width
+		nbsp = font.glyphs["nbspace"]
+		if space and nbsp:
+			nb_issues = []
+			for m in masters:
+				sw = space.layers[m.id].width
+				nw = nbsp.layers[m.id].width
+				if abs(sw - nw) > 1:
+					nb_issues.append(f"{m.name}: space={sw} nbspace={nw}")
+			_check("nbspace_width", "warning", len(nb_issues) == 0,
+				"nbspace width matches space" if not nb_issues else "nbspace width ≠ space",
+				nb_issues if nb_issues else None)
+
+		# 28. Zero-width letters
+		zw_letters = []
+		for g in export_glyphs:
+			if (g.category or "") != "Letter":
+				continue
+			for m in masters:
+				if g.layers[m.id].width == 0:
+					zw_letters.append(g.name)
+					break
+		_check("zero_width_letters", "warning", len(zw_letters) == 0,
+			f"{len(zw_letters)} zero-width letter glyphs" if zw_letters else "No zero-width letters",
+			zw_letters[:20] if zw_letters else None)
+
+		# 29. PANOSE
+		panose = None
+		for p in font.customParameters:
+			if p.name == "panose":
+				panose = list(p.value)
+		panose_ok = panose and any(v != 0 for v in panose)
+		_check("panose", "warning", bool(panose_ok),
+			f"PANOSE set: {panose}" if panose_ok else "PANOSE not set or all zeros")
+
+		# 30. Stems defined
+		stems_ok = True
+		stems_info = []
+		for m in masters:
+			try:
+				stems = list(m.stems) if m.stems else []
+			except:
+				stems = []
+			if not stems:
+				stems_ok = False
+				stems_info.append(f"{m.name}: no stems defined")
+			else:
+				stems_info.append(f"{m.name}: {len(stems)} stems")
+		_check("stems_defined", "warning", stems_ok,
+			"Stems defined in all masters" if stems_ok else "Missing stem definitions",
+			stems_info if not stems_ok else None)
+
+		# 31. Short segments
+		short_segs = []
+		for g in export_glyphs[:200]:
+			if (g.category or "") != "Letter":
+				continue
+			for m in masters:
+				found = False
+				for path in g.layers[m.id].paths:
+					nodes = list(path.nodes)
+					n = len(nodes)
+					for i in range(n):
+						n1 = nodes[i]
+						n2 = nodes[(i+1) % n]
+						if n1.type != "offcurve" and n2.type != "offcurve":
+							dx = n2.position.x - n1.position.x
+							dy = n2.position.y - n1.position.y
+							dist = math.sqrt(dx*dx + dy*dy)
+							if dist < 2 and dist > 0:
+								short_segs.append(f"{g.name} ({m.name})")
+								found = True
+								break
+					if found:
+						break
+				if found:
+					break
+		_check("short_segments", "warning", len(short_segs) == 0,
+			f"{len(short_segs)} glyphs with very short segments (<2u)" if short_segs else "No short segments",
+			short_segs[:20] if short_segs else None)
+
+		# 32. Near-vertical/horizontal lines
+		near_vh = []
+		for g in export_glyphs[:200]:
+			if (g.category or "") != "Letter":
+				continue
+			for m in masters:
+				found = False
+				for path in g.layers[m.id].paths:
+					nodes = list(path.nodes)
+					n = len(nodes)
+					for i in range(n):
+						n1 = nodes[i]
+						n2 = nodes[(i+1) % n]
+						if n1.type == "offcurve" or n2.type == "offcurve":
+							continue
+						dx = abs(n2.position.x - n1.position.x)
+						dy = abs(n2.position.y - n1.position.y)
+						if (0 < dx <= 2 and dy > 20) or (0 < dy <= 2 and dx > 20):
+							near_vh.append(f"{g.name} ({m.name})")
+							found = True
+							break
+					if found:
+						break
+				if found:
+					break
+		_check("near_misses", "warning", len(near_vh) == 0,
+			f"{len(near_vh)} glyphs with near-vertical/horizontal lines (off by 1-2u)" if near_vh else "No near-miss alignments",
+			near_vh[:20] if near_vh else None)
+
+		# 33. Presentation forms decomposition (fi, fl, ff, etc.)
+		pf_names = ["fi", "fl", "ff", "ffi", "ffl"]
+		pf_present = [n for n in pf_names
+			if font.glyphs[n] and font.glyphs[n].export and font.glyphs[n].unicode]
+		if pf_present:
+			ccmp_feat = font.features["ccmp"] if font.features else None
+			ccmp_code = ccmp_feat.code if ccmp_feat else ""
+			not_decomposed = [n for n in pf_present if f"sub {n} " not in ccmp_code and f"sub {n}\t" not in ccmp_code]
+			_check("presentation_forms", "warning", len(not_decomposed) == 0,
+				"Presentation forms decomposed in ccmp" if not not_decomposed
+				else f"{len(not_decomposed)} presentation forms not decomposed in ccmp (breaks tracking & smallcaps)",
+				not_decomposed if not_decomposed else None)
+
+		# 34. German sharp S contextual substitution
+		germandbls_g = font.glyphs["germandbls"]
+		uc_sharp = font.glyphs["Germandbls"] or font.glyphs["germandbls.calt"]
+		if germandbls_g and uc_sharp and germandbls_g.export and uc_sharp.export:
+			has_german_sub = False
+			for feat in (font.features or []):
+				if feat.name in ("calt", "locl"):
+					if "germandbls" in (feat.code or "") or "Germandbls" in (feat.code or ""):
+						has_german_sub = True
+						break
+			_check("german_sharp_s", "warning", has_german_sub,
+				"German sharp S substitution found" if has_german_sub
+				else f"Font has {uc_sharp.name} but no contextual calt/locl substitution (German ß→ẞ between caps)")
+
+		# 35. Dutch IJ localization
+		jacute_g = font.glyphs["Jacute"]
+		if jacute_g and jacute_g.export:
+			locl_feat = font.features["locl"] if font.features else None
+			has_nld = bool(locl_feat and "NLD" in (locl_feat.code or ""))
+			_check("dutch_ij", "warning", has_nld,
+				"Dutch NLD localization found in locl" if has_nld
+				else "Font has Jacute but no NLD localization in locl")
+
+		# 36. Smallcap feature completeness
+		smcp_feat = font.features["smcp"] if font.features else None
+		if smcp_feat:
+			sc_missing = []
+			sc_casefoldings = {"idotless": "i", "jdotless": "j", "kgreenlandic": "k", "longs": "s"}
+			sc_suffixes = ("sc", "smcp", "c2sc", "small", "smallcap")
+			smcp_code = smcp_feat.code or ""
+			for src_name in sorted(sc_casefoldings.keys()):
+				src_g = font.glyphs[src_name]
+				if src_g and src_g.export:
+					has_own_sc = any(font.glyphs[f"{src_name}.{sfx}"] for sfx in sc_suffixes)
+					in_smcp = f"sub {src_name}" in smcp_code
+					if not has_own_sc and not in_smcp:
+						sc_missing.append(src_name)
+			if sc_missing:
+				_check("sc_completeness", "warning", False,
+					f"smcp missing substitutions for: {', '.join(sc_missing)}",
+					sc_missing)
+
+		# 37. salt feature from ssXX
+		ssXX_feats = [f for f in (font.features or [])
+			if f.name.startswith("ss") and len(f.name) == 4 and f.name[2:].isdigit()]
+		if ssXX_feats:
+			salt_feat = font.features["salt"] if font.features else None
+			_check("salt_feature", "warning", salt_feat is not None,
+				f"salt feature present ({len(ssXX_feats)} ssXX features)" if salt_feat
+				else f"{len(ssXX_feats)} ssXX features but no salt feature (limits app compatibility)")
+
+		# 38. Languagesystems prefix
+		if font.features and len(font.features) > 0:
+			has_langsys = False
+			for pfx in (font.featurePrefixes or []):
+				if "languagesystem" in (pfx.code or "").lower() or pfx.name == "Languagesystems":
+					has_langsys = True
+					break
+			_check("languagesystems", "warning", has_langsys,
+				"Languagesystems prefix defined" if has_langsys
+				else "No languagesystems prefix (needed for locl and script/language support)")
+
+		# 39. Remove Overlap on export
+		# RemoveOverlap is ON by default in GlyphsApp export.
+		# Only flag if explicitly disabled at font or instance level.
+		ro_disabled_font = False
+		for p in font.customParameters:
+			if p.name == "RemoveOverlap" and not p.value:
+				ro_disabled_font = True
+				break
+		ro_disabled_instances = []
+		for inst in font.instances:
+			for p in inst.customParameters:
+				if p.name == "RemoveOverlap" and not p.value:
+					ro_disabled_instances.append(inst.name)
+					break
+		ro_ok = not ro_disabled_font and len(ro_disabled_instances) == 0
+		if ro_disabled_font:
+			ro_msg = "RemoveOverlap DISABLED at font level (overlaps in exported outlines cause rendering issues with stroked text)"
+		elif ro_disabled_instances:
+			ro_msg = f"RemoveOverlap disabled on {len(ro_disabled_instances)} instances"
+		else:
+			ro_msg = "RemoveOverlap active (default on)"
+		_check("remove_overlap", "warning", ro_ok, ro_msg,
+			ro_disabled_instances[:10] if ro_disabled_instances else None)
+
+		# ══════════════════════════════════════════════════════════════
+		# INFO CHECKS
+		# ══════════════════════════════════════════════════════════════
+
+		# 40. Glyph count by category
+		cat_counts = {}
+		for g in export_glyphs:
+			cat = g.category or "Other"
+			cat_counts[cat] = cat_counts.get(cat, 0) + 1
+		_check("glyph_summary", "info", True,
+			f"{len(export_glyphs)} exporting glyphs",
+			cat_counts)
+
+		# 41. Font metrics summary
+		metrics_summary = {}
+		for m in masters:
+			metrics_summary[m.name] = {
+				"ascender": int(m.ascender), "descender": int(m.descender),
+				"xHeight": int(m.xHeight), "capHeight": int(m.capHeight),
+			}
+		_check("font_metrics", "info", True,
+			f"UPM={font.upm}", metrics_summary)
+
+		# 42. fsType
+		fs_type = None
+		for p in font.customParameters:
+			if p.name == "fsType":
+				fs_type = list(p.value) if p.value else []
+		fs_msg = "Installable (no restrictions)" if fs_type == [] else f"fsType={fs_type}"
+		_check("fs_type", "info", True, fs_msg)
+
+		# 43. VF readiness
+		if len(masters) >= 2:
+			vf_info = {
+				"axes": [(a.name, a.axisTag) for a in font.axes],
+				"masters": len(masters),
+				"instances": len(font.instances),
+			}
+			# Check STAT
+			has_stat = False
+			for p in font.customParameters:
+				if "STAT" in str(p.name):
+					has_stat = True
+			vf_info["STAT_configured"] = has_stat
+			_check("vf_readiness", "info", True,
+				f"Variable font: {len(font.axes)} axes, {len(font.instances)} instances",
+				vf_info)
+
+		# 44. Unreachable glyphs
+		unreachable = []
+		for g in export_glyphs:
+			if g.unicode:
+				continue
+			if g.name.startswith(".") or g.name.startswith("_"):
+				continue
+			if g.name in component_refs:
+				continue
+			unreachable.append(g.name)
+		_check("unreachable_glyphs", "info", True,
+			f"{len(unreachable)} glyphs with no unicode and not used as components",
+			unreachable[:30] if unreachable else None)
+
+		# ── Build summary ────────────────────────────────────────────
+		summary = {"critical": 0, "warning": 0, "info": 0,
+				   "critical_passed": 0, "warning_passed": 0}
+		for c in checks:
+			sev = c["severity"]
+			if sev == "critical":
+				if c["passed"]: summary["critical_passed"] += 1
+				else: summary["critical"] += 1
+			elif sev == "warning":
+				if c["passed"]: summary["warning_passed"] += 1
+				else: summary["warning"] += 1
+			else:
+				summary["info"] += 1
+
+		return {
+			"ok": True,
+			"fontName": font.familyName,
+			"glyphCount": len(export_glyphs),
+			"masterCount": len(masters),
+			"summary": summary,
+			"checks": checks,
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		return 500, {"ok": False, "error": result["error"]}
 	return 200, result

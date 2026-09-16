@@ -20,7 +20,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp[cli]>=1.0.0,<2",
+    "glyphsets",
+    "shaperglot",
 ]
 
 [project.urls]
@@ -32,4 +34,15 @@ glyphs-mcp = "glyphs_mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
-include = ["glyphs_mcp_server.py"]
+include = [
+    "glyphs_mcp_server.py",
+    "font_name_check.py",
+    "plugin/GlyphsMCP.glyphsPlugin/Contents/Resources/recipes/*.md",
+]
+exclude = [
+    "/.atl",
+    "/.codegraph",
+    "/.venv",
+    "/dist",
+    "/tests",
+]

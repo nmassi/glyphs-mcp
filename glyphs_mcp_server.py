@@ -13,10 +13,13 @@ See ARCHITECTURE.md §4 for design details.
 """
 
 import json
+import os
+import tempfile
 import urllib.request
 import urllib.error
 import base64
 from mcp.server.fastmcp import FastMCP
+from font_name_check import check_font_name as _check_font_name
 
 mcp = FastMCP("glyphs-mcp")
 
@@ -54,14 +57,14 @@ def _delete(path: str, body: dict = None) -> dict:
         return {"error": str(e)}
 
 
-def _post(path: str, body: dict) -> dict:
+def _post(path: str, body: dict, timeout: int = 15) -> dict:
     """POST request to the GlyphsApp plugin."""
     url = f"{GLYPHS_URL}{path}"
     data = json.dumps(body).encode("utf-8")
     try:
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         return {"error": f"Cannot connect to GlyphsApp plugin at {url}. Is GlyphsApp running with GlyphsMCP plugin? ({e})"}
@@ -82,13 +85,27 @@ def get_font_info() -> dict:
 
 
 @mcp.tool()
-def list_glyphs() -> dict:
-    """List all glyphs in the open font with basic metadata.
+def list_glyphs(category: str = "", limit: int = 0) -> dict:
+    """List glyphs in the open font with basic metadata.
 
-    Returns glyph names, unicodes, layer count, script, category.
+    Returns glyph names, unicodes, category, subCategory.
     Does NOT include path data — use get_glyph() for full details.
+
+    Args:
+        category: Filter by category — "Letter", "Number", "Punctuation",
+                  "Symbol", "Separator", "Mark", "Other". Empty = all.
+        limit: Max glyphs to return. 0 = all.
     """
-    return _get("/api/font/glyphs")
+    params = []
+    if category:
+        params.append(f"category={category}")
+    if limit:
+        params.append(f"limit={limit}")
+    path = "/api/font/glyphs"
+    if params:
+        path += "?" + "&".join(params)
+    return _get(path)
+
 
 
 @mcp.tool()
@@ -140,12 +157,26 @@ def get_masters() -> dict:
 
 
 @mcp.tool()
-def get_kerning(master_id: str = "") -> dict:
-    """Get kerning pairs for a specific master (or first master if not specified)."""
-    path = "/api/font/kerning"
+def get_kerning(master_id: str = "", left: str = "", limit: int = 0) -> dict:
+    """Get kerning pairs for a specific master (or first master if not specified).
+
+    Args:
+        master_id: Master ID. Empty = first master.
+        left: Filter by left glyph/group name. Empty = all.
+        limit: Max pairs to return. 0 = all. Use limit=50 for large fonts.
+    """
+    params = []
     if master_id:
-        path += f"?master={master_id}"
+        params.append(f"master={master_id}")
+    if left:
+        params.append(f"left={left}")
+    if limit:
+        params.append(f"limit={limit}")
+    path = "/api/font/kerning"
+    if params:
+        path += "?" + "&".join(params)
     return _get(path)
+
 
 
 @mcp.tool()
@@ -317,16 +348,19 @@ def rmx_harmonize(glyph_name: str, mode: str = "harmonize", master_id: str = "")
 
 
 @mcp.tool()
-def rmx_scale(glyph_name: str, width: int = 100, height: int = 100,
-              weight: int = 0, adjust_space: int = 0,
-              vertical_shift: int = 0, master_id: str = "") -> dict:
+def rmx_scale(glyph_name: str, width: int | list[int] = 100,
+              height: int | list[int] = 100,
+              weight: int | list[int] = 0,
+              adjust_space: int | list[int] = 0,
+              vertical_shift: int | list[int] = 0,
+              master_id: str = "", allow_fallback: bool = False) -> dict:
     """Scale a glyph by percentage in width and/or height.
 
     USE THIS for percentage-based scaling requests like "make 30% wider".
 
-    Tries RMX Scaler first (stroke weight compensation via master interpolation).
-    Falls back to native affine transform if RMX headless API is unavailable
-    (GlyphsApp 3.5+ changed internal APIs). Response includes "method" field:
+    Uses RMX Scaler with stroke-weight compensation via master interpolation.
+    Native affine fallback is opt-in because it cannot preserve stem weight.
+    Response includes a "method" field:
     "rmx" = RMX Scaler was used, "native_transform" = affine transform fallback.
 
     Args:
@@ -336,7 +370,11 @@ def rmx_scale(glyph_name: str, width: int = 100, height: int = 100,
         weight: Stroke weight delta (RMX only, ignored in native fallback)
         adjust_space: Sidebearing adjustment delta
         vertical_shift: Vertical position offset
-        master_id: Optional master ID (empty = first master)
+        master_id: Optional active master ID. RMX still processes all masters.
+        allow_fallback: Permit native affine scaling if RMX fails. Default False.
+
+        RMX parameters accept either one value for every master or a list in
+        font master order for independent per-master control.
 
     Examples:
         "Make R 30% wider" → rmx_scale("R", width=130)
@@ -350,44 +388,43 @@ def rmx_scale(glyph_name: str, width: int = 100, height: int = 100,
         "weight": weight,
         "adjustSpace": adjust_space,
         "verticalShift": vertical_shift,
+        "allowFallback": allow_fallback,
     }
     if master_id:
         body["masterId"] = master_id
     return _post("/api/filters/rmx/scale", body)
 
 
+
 @mcp.tool()
 def rmx_tune(glyph_name: str, weight: int = 0, width: int = 0,
-             height: int = 0, slant: int = 0, fixed_width: bool = False,
-             master_id: str = "") -> dict:
-    """Adjust a glyph's weight, width, height, or slant using RMX Tuner.
+             height: int = 0, slant: int = 0, blend: float = 0.0,
+             fixed_width: bool = False, master_id: str = "",
+             all_masters: bool = False) -> dict:
+    """Adjust a glyph by delegating directly to the installed RMX Tuner.
 
-    USE THIS for qualitative adjustments like "make bolder" or "add italic slant".
-    For percentage-based width/height changes, prefer rmx_scale() instead.
+    This tool calls the real RMXTuner instance loaded in GlyphsApp
+    (`Glyphs.filters`) and passes the values to Tuner's own controls. It does
+    NOT approximate Tuner with native interpolation.
 
-    IMPORTANT: Values are NOT percentages — they are relative adjustment deltas
-    in arbitrary units. Typical useful range: -100 to +100.
-
-    Internally uses master interpolation along the font's weight axis for
-    weight/width/height, and native affine shear for slant.  Requires 2+
-    masters.  All changes are undoable (Cmd+Z).
+    IMPORTANT: Width/height/weight/slant are RMX Tuner deltas, not
+    percentages. Typical useful range is roughly -100 to +100, depending on the
+    font/RMX setup. Blend is normalized: 0 = no blend-in layer, 1 = full
+    blend-in layer. Values above 1 extrapolate and can produce extreme outlines.
 
     Args:
-        glyph_name: Name of the glyph
-        weight: Stroke weight delta (+ = bolder, - = lighter)
-        width: Horizontal expansion delta (+ = wider, - = narrower)
-        height: Vertical expansion delta (+ = taller, - = shorter)
-        slant: Italic slant in degrees (+ = right lean)
-        fixed_width: Keep advance width unchanged during adjustment
-        master_id: Optional master ID
+        glyph_name: Name of the glyph to tune.
+        weight: RMX Tuner Weight value (+ = heavier, - = lighter).
+        width: RMX Tuner Width value (+ = wider, - = narrower).
+        height: RMX Tuner Height value (+ = taller, - = shorter).
+        slant: RMX Tuner Slant value.
+        blend: RMX Tuner Blend value. Use 0.0–1.0 for interpolation.
+        fixed_width: Keep advance width fixed via RMX Tuner's checkbox.
+        master_id: Optional master/layer ID. Empty = first master.
+        all_masters: If True, pass all master layers of the glyph to RMX Tuner.
 
-    Examples:
-        "Make R bolder" → rmx_tune("R", weight=30)
-        "Make R much lighter" → rmx_tune("R", weight=-50)
-        "Add 12° italic slant to R" → rmx_tune("R", slant=12)
-        "Make R bolder but keep same width" → rmx_tune("R", weight=30, fixed_width=True)
-
-    Requires 2+ masters in the font. Returns width before and after.
+    Example:
+        rmx_tune("R.001", height=88, weight=88)
     """
     body = {
         "glyphName": glyph_name,
@@ -395,11 +432,14 @@ def rmx_tune(glyph_name: str, weight: int = 0, width: int = 0,
         "width": width,
         "height": height,
         "slant": slant,
+        "blend": blend,
         "fixedWidth": fixed_width,
+        "allMasters": all_masters,
     }
     if master_id:
         body["masterId"] = master_id
-    return _post("/api/filters/rmx/tune", body)
+    return _post("/api/filters/rmx/tune", body, timeout=90)
+
 
 
 @mcp.tool()
@@ -840,6 +880,9 @@ def measure_stems(glyph_name: str, master_id: str = "",
 def compare_stems(glyph_names: list[str], master_id: str = "") -> str:
     """Compare stem thicknesses across multiple glyphs to find inconsistencies.
 
+    RECIPE: For a full font audit (stems + color + proportions + spacing),
+    call get_recipe("audit_consistency") — it runs checks in dependency order.
+
     Evaluates each glyph against industry stem patterns for optical
     compensation. Per-glyph verdicts:
     - pass: stem within expected tolerance (green in GlyphsApp)
@@ -872,6 +915,7 @@ def compare_stems(glyph_names: list[str], master_id: str = "") -> str:
     if master_id:
         body["masterId"] = master_id
     return _format_compare_stems(_post("/api/font/stems/compare", body))
+
 
 
 @mcp.tool()
@@ -1226,6 +1270,9 @@ def _format_compatibility_report(data: dict) -> str:
 def check_compatibility(glyph_names: list[str] = None) -> str:
     """Check master compatibility across all glyphs in the font.
 
+    RECIPE: For a complete pre-export check, call get_recipe("master_compatibility")
+    first — it includes metrics interpolation and alignment zone verification.
+
     Compares layers across masters for each glyph, checking:
     - Path count, node count, node types, path directions
     - Path order (spatial position must match across masters)
@@ -1246,6 +1293,7 @@ def check_compatibility(glyph_names: list[str] = None) -> str:
         body["glyphNames"] = glyph_names
     data = _post("/api/font/compatibility/check", body)
     return _format_compatibility_report(data)
+
 
 
 def _format_kerning_report(data: dict) -> str:
@@ -1413,6 +1461,9 @@ def _format_kerning_report(data: dict) -> str:
 def analyze_kerning(master_id: str = "") -> str:
     """Analyze kerning quality across all masters.
 
+    RECIPE: For kerning from scratch, call get_recipe("kerning_from_scratch")
+    first — it covers group assignment, critical pairs, and verification.
+
     Checks for:
     - Cross-master missing pairs (pair in some masters but not all — causes interpolation jumps)
     - Cross-master sign changes (positive in one master, negative in another)
@@ -1431,6 +1482,7 @@ def analyze_kerning(master_id: str = "") -> str:
         body["masterId"] = master_id
     data = _post("/api/font/kerning/analyze", body)
     return _format_kerning_report(data)
+
 
 
 def _format_spacing_report(data: dict) -> str:
@@ -1607,6 +1659,9 @@ def _format_spacing_report(data: dict) -> str:
 def analyze_spacing(master_id: str = "", glyph_names: list[str] = None) -> str:
     """Analyze spacing quality across all masters.
 
+    RECIPE: For systematic spacing work, call get_recipe("spacing_workflow")
+    first — it follows Cheng/Briem/Ruder methodology step by step.
+
     Measures sidebearings and white space margins using scanline ray-casting,
     then checks for consistency issues:
     - Sidebearing group consistency (n-group: h,i,k,l,m,n,p,r should match; o-group: c,d,e,g,o,q)
@@ -1632,6 +1687,7 @@ def analyze_spacing(master_id: str = "", glyph_names: list[str] = None) -> str:
         body["glyphNames"] = glyph_names
     data = _post("/api/font/spacing/analyze", body)
     return _format_spacing_report(data)
+
 
 
 @mcp.tool()
@@ -1710,6 +1766,1106 @@ def get_spacing_strings(glyph_name: str) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def check_font_name(name: str) -> dict:
+    """Screen one proposed typeface family name for known collisions.
+
+    Queries the public Fontdata Namecheck API and returns exact, close, and
+    partial match counts, trademark information, a review status, timestamp,
+    and a link to the full result. This is collision screening, not legal
+    clearance: a name that is not found is not guaranteed to be available.
+
+    Args:
+        name: Proposed typeface family name to check.
+    """
+    return _check_font_name(name)
+
+
+@mcp.tool()
+def generate_box_drawing(
+    glyph_names: list[str] = [],
+    overwrite: bool = False,
+    width: float = 0,
+    stroke: float = 0,
+    heavy_stroke: float = 0,
+    double_gap: float = 0,
+    color: int = 7,
+) -> dict:
+    """Generate Unicode box drawing and block element glyphs in the open font.
+
+    By default, processes U+2500–U+259F. Existing drawn glyphs are skipped
+    unless `overwrite=True`. The tool draws directly in the .glyphs source
+    across all masters, using auto-detected stem values when stroke params
+    are left at 0.
+
+    Args:
+        glyph_names: Optional subset to generate. Accepts glyph names, single
+            characters, or codepoints like "U+2500".
+        overwrite: Replace existing drawings if True.
+        width: Force advance width for generated glyphs. 0 = auto.
+        stroke: Light/single stroke thickness. 0 = auto.
+        heavy_stroke: Heavy stroke thickness. 0 = auto.
+        double_gap: Gap between double-line strokes. 0 = auto.
+        color: Optional glyph color label for newly created glyphs.
+    """
+    body = {
+        "glyphNames": glyph_names,
+        "overwrite": overwrite,
+        "width": width,
+        "stroke": stroke,
+        "heavyStroke": heavy_stroke,
+        "doubleGap": double_gap,
+        "color": color,
+    }
+    return _post("/api/font/box-drawing/generate", body, timeout=60)
+
+
+@mcp.tool()
+def analyze_kerning_groups(
+    glyph_names: list[str] | None = None,
+    apply: bool = True,
+    overwrite: bool = True,
+) -> str:
+    """Analyze and assign kerning groups to all glyphs.
+
+    RECIPE: For a complete kerning workflow (groups → pairs → verification),
+    call get_recipe("kerning_from_scratch") first.
+
+    Assigns correct groups to all glyphs, overwriting any existing values.
+    Uses a five-tier resolution strategy:
+    1. Dictionary lookup for ~80 base glyphs (A-Z, a-z, figures, punctuation)
+    2. Dot-suffix stripping (a.ss01 → a)
+    3. Component inheritance for accented/composite glyphs (Aacute → A)
+    4. Unicode decomposition fallback
+    5. Contour analysis fallback (ray-casting edge detection)
+
+    Group names follow professional conventions (key glyph = group name):
+    - UC left: H (straight stem), O (round), A (diagonal), V, T, S, etc.
+    - UC right: H (straight), O (round), D (half-round), E (horizontal), etc.
+    - LC left: h (straight), o (round), v (diagonal), f, etc.
+    - LC right: h (straight), n (arch), o (round), etc.
+    - Figures: each gets its own group (shapes too varied)
+
+    Marks glyphs green in GlyphsApp after applying.
+
+    Args:
+        glyph_names: Optional list of glyph names (default: all Letter/Number/Punctuation glyphs)
+        apply: If True (default), assign groups. If False, dry run only.
+        overwrite: If True (default), overwrite existing groups. If False, only assign to empty slots.
+    """
+    body = {"apply": apply, "overwrite": overwrite}
+    if glyph_names:
+        body["glyphNames"] = glyph_names
+    data = _post("/api/font/kerning/groups/analyze", body)
+    return _format_kerning_groups_report(data)
+
+
+def _format_kerning_groups_report(data: dict) -> str:
+    """Format kerning group analysis results as a readable markdown report."""
+    if not data.get("ok"):
+        return data.get("error", "Unknown error")
+
+    stats = data.get("stats", {})
+    changes = data.get("changes", [])
+    change_count = data.get("changeCount", len(changes))
+    applied = data.get("applied", False)
+    group_summary = data.get("groupSummary", {})
+
+    lines = []
+    action_word = "Applied" if applied else "Proposed"
+    lines.append(f"## Kerning Groups Analysis — {action_word}")
+    lines.append("")
+
+    # Stats
+    lines.append("### Summary")
+    lines.append("")
+    lines.append(f"- **Total glyphs analyzed:** {stats.get('total', 0)}")
+    lines.append(f"- **Already matching:** {stats.get('already_match', 0)}")
+    lines.append(f"- **Would change (left):** {stats.get('would_change_left', 0)}")
+    lines.append(f"- **Would change (right):** {stats.get('would_change_right', 0)}")
+    lines.append(f"- **Skipped (existing):** {stats.get('skipped_existing', 0)}")
+    if applied:
+        lines.append(f"- **Applied (left):** {stats.get('applied_left', 0)}")
+        lines.append(f"- **Applied (right):** {stats.get('applied_right', 0)}")
+    lines.append("")
+
+    # Resolution methods
+    by_method = stats.get("by_method", {})
+    if by_method:
+        lines.append("### Resolution methods")
+        lines.append("")
+        for method, count in sorted(by_method.items(), key=lambda x: -x[1]):
+            lines.append(f"- **{method}:** {count}")
+        lines.append("")
+
+    # Separate skipped-but-different from actual changes
+    skipped_diffs = [c for c in changes if c.get("leftAction") == "skip_existing" or c.get("rightAction") == "skip_existing"]
+    actual_changes = [c for c in changes if c.get("leftAction") == "change" or c.get("rightAction") == "change"]
+
+    # Existing groups that differ from proposed
+    if skipped_diffs:
+        lines.append(f"### Review: existing groups differ from proposed ({len(skipped_diffs)})")
+        lines.append("These glyphs already have groups that differ from what the tool would assign.")
+        lines.append("This may be intentional (e.g., M with diagonal stems kept separate from H).")
+        lines.append("")
+        lines.append("| Glyph | Side | Current | Proposed | Method |")
+        lines.append("|-------|------|---------|----------|--------|")
+        for c in skipped_diffs:
+            cl = c.get("currentLeft", "") or "—"
+            cr = c.get("currentRight", "") or "—"
+            pl = c.get("proposedLeft", "")
+            pr = c.get("proposedRight", "")
+            if c.get("leftAction") == "skip_existing" and cl != pl:
+                lines.append(f"| {c['glyph']} | L | {cl} | {pl} | {c['method']} |")
+            if c.get("rightAction") == "skip_existing" and cr != pr:
+                lines.append(f"| {c['glyph']} | R | {cr} | {pr} | {c['method']} |")
+        lines.append("")
+
+    # Changes table
+    if actual_changes:
+        display_limit = 30
+        lines.append(f"### {'Applied' if applied else 'Proposed'} changes ({len(actual_changes)})")
+        lines.append("")
+        lines.append("| Glyph | Side | Current | New | Method |")
+        lines.append("|-------|------|---------|-----|--------|")
+        shown = 0
+        for c in actual_changes:
+            if shown >= display_limit:
+                lines.append(f"| ... | | | | +{len(actual_changes) - display_limit} more |")
+                break
+            cl = c.get("currentLeft", "") or "—"
+            cr = c.get("currentRight", "") or "—"
+            pl = c.get("proposedLeft", "")
+            pr = c.get("proposedRight", "")
+            if c.get("leftAction") == "change":
+                lines.append(f"| {c['glyph']} | L | {cl} | {pl} | {c['method']} |")
+            if c.get("rightAction") == "change":
+                lines.append(f"| {c['glyph']} | R | {cr} | {pr} | {c['method']} |")
+            shown += 1
+        lines.append("")
+
+    # Group summary — compact: just counts
+    left_groups = group_summary.get("left", {})
+    right_groups = group_summary.get("right", {})
+    if left_groups or right_groups:
+        lines.append(f"### Groups: {len(left_groups)} left, {len(right_groups)} right")
+        # Show only large groups (5+ members) to keep it short
+        for side, groups in [("L", left_groups), ("R", right_groups)]:
+            big = {k: v for k, v in groups.items() if len(v) >= 5}
+            if big:
+                for name in sorted(big.keys()):
+                    members = big[name]
+                    lines.append(f"- {side}: **{name}** ({len(members)}): {', '.join(sorted(members)[:10])}" + (f" +{len(members) - 10}" if len(members) > 10 else ""))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def smart_scale(
+    width: float = 1.0,
+    height: float = 1.0,
+    weight: float = 1.0,
+    proportional: bool = False,
+    glyph_names: list[str] | None = None,
+    master_id: str = "",
+    backup: bool = True,
+) -> dict:
+    """Scale glyphs with automatic stem weight compensation.
+
+    RECIPE: For multi-glyph scaling tasks, call get_recipe("scale_proportions")
+    first — it includes pre/post stem verification and visual comparison steps.
+
+    Unlike simple affine transforms which distort stem weights, this tool:
+    1. Measures reference stems (H for UC, n for LC) before scaling
+    2. Applies the width/height transform
+    3. Uses GlyphsFilterOffsetCurve to compensate stem thickness changes
+    4. Reports before/after stem measurements for verification
+
+    All values are scale factors where 1.0 = no change.
+
+    Args:
+        width: Horizontal scale factor. 0.97 = 3% narrower, 1.1 = 10% wider
+        height: Vertical scale factor. 1.15 = 15% taller, 0.9 = 10% shorter
+        weight: Target stem weight factor. 1.0 = maintain original stem thickness
+            after scaling (compensate). 0.9 = make stems 10% thinner. 1.1 = 10% thicker.
+        proportional: If true, height follows width (uniform scale with compensation)
+        glyph_names: List of glyph names to process (empty = all exporting glyphs)
+        master_id: Process only this master (empty = all masters)
+        backup: Create backup layers before modifying (default true)
+
+    Examples:
+        Condense 3% keeping weight: smart_scale(width=0.97, weight=1.0)
+        Increase x-height 15% keeping weight: smart_scale(height=1.15, weight=1.0)
+        Scale uniformly 90% with weight compensation: smart_scale(width=0.9, proportional=True)
+        Make all stems 10% thicker: smart_scale(weight=1.1)
+        Condense UC only: smart_scale(width=0.95, glyph_names=["A","B","C",...])
+    """
+    body: dict = {
+        "width": width,
+        "height": height,
+        "weight": weight,
+        "proportional": proportional,
+        "backup": backup,
+    }
+    if glyph_names:
+        body["glyphNames"] = glyph_names
+    if master_id:
+        body["masterId"] = master_id
+    return _post("/api/font/smart-scale", body)
+
+
+@mcp.tool()
+def list_recipes() -> str:
+    """List available workflow recipes.
+
+    Recipes are step-by-step guides for complex type design tasks.
+    They tell you which tools to call, in what order, and what to check.
+
+    IMPORTANT: You MUST call this before starting any multi-step type design
+    task (scaling, auditing, spacing, kerning, compatibility checks, etc.).
+    If a recipe matches the task, call get_recipe(name) and follow its steps
+    in order — they encode expert type design knowledge and dependency ordering.
+    """
+    result = _get("/api/recipes")
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_recipe(name: str) -> str:
+    """Get a specific workflow recipe by name.
+
+    Returns the full recipe with step-by-step instructions, plus totalSteps count.
+    Use get_recipe_step() to read and execute one step at a time.
+
+    Args:
+        name: Recipe name (from list_recipes, e.g. 'scale_proportions')
+    """
+    result = _get(f"/api/recipes/{name}")
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_recipe_step(name: str, step: int) -> str:
+    """Get a single step from a recipe for sequential execution.
+
+    Returns step title, content, and a MANDATORY directive field.
+    You MUST follow the directive — it tells you exactly what to do next.
+
+    The response includes:
+    - step: current step number
+    - totalSteps: total steps in recipe
+    - title: step title
+    - content: tools to call and instructions
+    - directive: MANDATORY instruction for what to do after this step
+
+    IMPORTANT: Execute ALL tools listed in the step content before proceeding.
+    Do NOT skip steps. Do NOT combine steps. Follow the directive field.
+
+    Args:
+        name: Recipe name (e.g. 'audit_consistency')
+        step: Step number (1-based)
+    """
+    result = _get(f"/api/recipes/{name}/step/{step}")
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def create_recipe(name: str, content: str, overwrite: bool = False) -> str:
+    """Create a new workflow recipe.
+
+    Recipes are markdown files with numbered steps. Follow this format:
+
+    # Recipe: My Recipe Title
+
+    Description of what this recipe does.
+
+    ## Steps
+
+    ### 1. First step title
+    - `tool_name` — what it does
+    - `another_tool` — with parameters
+
+    ### 2. Second step title
+    - `tool_name` — instructions
+
+    Args:
+        name: Snake_case identifier (e.g. 'fix_spacing_issues')
+        content: Full markdown content of the recipe
+        overwrite: If true, replace existing recipe with same name
+    """
+    result = _post("/api/recipes", {
+        "name": name,
+        "content": content,
+        "overwrite": overwrite,
+    })
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def delete_recipe(name: str) -> str:
+    """Delete a workflow recipe.
+
+    Args:
+        name: Recipe name to delete (e.g. 'old_workflow')
+    """
+    result = _delete(f"/api/recipes/{name}")
+    return json.dumps(result, indent=2)
+
+
+def _format_auto_kern_report(data: dict) -> str:
+    """Format auto-kerning results as a readable markdown report."""
+    if not data.get("ok"):
+        return data.get("error", "Unknown error")
+
+    lines = []
+    dry = data.get("dryRun", False)
+    action = "Preview (dry run)" if dry else "Applied"
+    lines.append(f"## Auto-Kerning — {action}")
+    lines.append("")
+
+    params = data.get("params", {})
+    lines.append(f"step={params.get('step')}, depth={params.get('depth')}, "
+                 f"rounding={params.get('rounding')}, threshold={params.get('threshold')}")
+    lines.append("")
+
+    for mid, mdata in data.get("masters", {}).items():
+        mname = mdata.get("masterName", mid)
+        if mdata.get("error"):
+            lines.append(f"### {mname}: {mdata['error']}")
+            lines.append("")
+            continue
+
+        cal = mdata.get("calibration", {})
+        summary = mdata.get("summary", {})
+        results = mdata.get("results", [])
+
+        lines.append(f"### {mname}")
+        lines.append("")
+
+        # Calibration
+        if cal:
+            parts = []
+            if "lc_area" in cal:
+                parts.append(f"LC={cal['lc_area']} ({cal.get('lc_ref','nn')})")
+            if "uc_area" in cal:
+                parts.append(f"UC={cal['uc_area']} ({cal.get('uc_ref','HH')})")
+            lines.append(f"**Calibration**: {', '.join(parts)}")
+            lines.append("")
+
+        # Summary
+        kerned = mdata.get("pairsKerned", 0)
+        skipped = mdata.get("pairsSkipped", 0)
+        lines.append(f"**{kerned} pairs kerned**, {skipped} skipped")
+        if summary and kerned > 0:
+            lines.append(f"Range: {summary.get('minValue',0)} to {summary.get('maxValue',0)}, "
+                         f"avg: {summary.get('avgValue',0)} "
+                         f"({summary.get('negative',0)} negative, {summary.get('positive',0)} positive)")
+        lines.append("")
+
+        # Results table (only applied/preview pairs)
+        applied = [r for r in results if r.get("applied") or (dry and r.get("reason") is None)]
+        if applied:
+            lines.append("| Left | Right | Value |")
+            lines.append("|------|-------|------:|")
+            for r in applied[:30]:
+                lines.append(f"| {r['left']} | {r['right']} | {r['value']} |")
+            if len(applied) > 30:
+                lines.append(f"| ... | | +{len(applied)-30} more |")
+            lines.append("")
+
+        # Skipped summary
+        skip_reasons = {}
+        for r in results:
+            reason = r.get("reason")
+            if reason:
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+        if skip_reasons:
+            parts = [f"{r}: {c}" for r, c in sorted(skip_reasons.items())]
+            lines.append(f"Skipped: {', '.join(parts)}")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def auto_kern(
+    pairs: str = "critical",
+    pairs_list: list = None,
+    area: float = None,
+    step: int = 5,
+    depth: int = 200,
+    factor: float = 1.25,
+    rounding: int = 5,
+    threshold: int = 3,
+    use_groups: bool = True,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    master_id: str = "",
+) -> str:
+    """Auto-kern glyph pairs using optical gap analysis (MB LetterKerner algorithm).
+
+    Measures the optical white area between each glyph pair using horizontal
+    ray-casting, weighted by a trapezoidal function (full weight at baseline–xHeight,
+    tapered in descender/ascender zones), then solves for the kern value that
+    makes each pair's gap area match a calibration reference.
+
+    Auto-calibrates from nn (lowercase) and HH (uppercase) if no area is given.
+
+    Recommended workflow:
+    1. Finalize spacing first (kerning can't fix bad spacing)
+    2. Assign kerning groups: analyze_kerning_groups(apply=True)
+    3. Preview: auto_kern(pairs="critical", dry_run=True)
+    4. Apply critical: auto_kern(pairs="critical")
+    5. Expand: auto_kern(pairs="auto") — all group combinations
+    6. Verify: analyze_kerning()
+
+    Args:
+        pairs: Pair selection mode:
+            "critical" — ~75 essential pairs (AV, AT, To, Va, etc.)
+            "auto" — generate representative pairs per kerning group combination
+            "explicit" — use pairs_list
+        pairs_list: Explicit pairs when pairs="explicit", e.g. [["A","V"],["T","o"]]
+        area: Target gap area in units². None = auto-calibrate from nn/HH.
+        step: Vertical sampling interval (default 5u, smaller = more precise)
+        depth: Max probe depth per side (default 200u)
+        factor: Optical correction factor (default 1.25, matches HT LetterSpacer)
+        rounding: Round kern values to multiples of this (default 5)
+        threshold: Skip kern values with abs < threshold (default 3)
+        use_groups: Use group kerning keys (default True, strongly recommended)
+        overwrite: Overwrite existing kerning (default False)
+        dry_run: Preview only, don't apply (default False)
+        master_id: Process only this master (empty = all masters)
+    """
+    body = {
+        "pairs": pairs,
+        "step": step,
+        "depth": depth,
+        "factor": factor,
+        "rounding": rounding,
+        "threshold": threshold,
+        "useGroups": use_groups,
+        "overwrite": overwrite,
+        "dryRun": dry_run,
+    }
+    if pairs_list:
+        body["pairsList"] = pairs_list
+    if area is not None:
+        body["area"] = area
+    if master_id:
+        body["masterId"] = master_id
+    data = _post("/api/font/kerning/auto", body, timeout=30)
+    if "error" in data and "ok" not in data:
+        return json.dumps(data)
+    return _format_auto_kern_report(data)
+
+
+def _format_production_review(data: dict) -> str:
+    """Format production review results as a readable markdown report."""
+    if not data.get("ok"):
+        return data.get("error", "Unknown error")
+
+    summary = data.get("summary", {})
+    checks = data.get("checks", [])
+    font_name = data.get("fontName", "Unknown")
+    glyph_count = data.get("glyphCount", 0)
+    master_count = data.get("masterCount", 0)
+
+    lines = []
+    lines.append(f"# Production Review: {font_name}")
+    lines.append(f"{glyph_count} glyphs, {master_count} masters")
+    lines.append("")
+
+    # Summary
+    crit_fail = summary.get("critical", 0)
+    crit_pass = summary.get("critical_passed", 0)
+    warn_fail = summary.get("warning", 0)
+    warn_pass = summary.get("warning_passed", 0)
+    info_count = summary.get("info", 0)
+
+    if crit_fail == 0 and warn_fail == 0:
+        lines.append("**All checks passed.**")
+    else:
+        if crit_fail > 0:
+            lines.append(f"**{crit_fail} critical issues** (must fix before export)")
+        if warn_fail > 0:
+            lines.append(f"**{warn_fail} warnings** (should fix)")
+    lines.append(f"{crit_pass} critical passed, {warn_pass} warnings passed, {info_count} info")
+    lines.append("")
+
+    # Group by severity
+    critical_fails = [c for c in checks if c["severity"] == "critical" and not c["passed"]]
+    critical_passes = [c for c in checks if c["severity"] == "critical" and c["passed"]]
+    warning_fails = [c for c in checks if c["severity"] == "warning" and not c["passed"]]
+    warning_passes = [c for c in checks if c["severity"] == "warning" and c["passed"]]
+    infos = [c for c in checks if c["severity"] == "info"]
+
+    def _format_details(details, cap=5):
+        """Format check details with a tight cap."""
+        out = []
+        if isinstance(details, list):
+            for d in details[:cap]:
+                out.append(f"  - {d}")
+            if len(details) > cap:
+                out.append(f"  - ... +{len(details) - cap} more")
+        elif isinstance(details, dict):
+            for k, v in list(details.items())[:cap]:
+                if isinstance(v, list):
+                    out.append(f"  - {k}: {', '.join(str(x) for x in v[:5])}")
+                else:
+                    out.append(f"  - {k}: {v}")
+        return out
+
+    # Critical failures (always show details)
+    if critical_fails:
+        lines.append("## Critical Issues")
+        for c in critical_fails:
+            lines.append(f"- **FAIL** `{c['name']}`: {c['message']}")
+            if c.get("details"):
+                lines.extend(_format_details(c["details"], cap=10))
+        lines.append("")
+
+    # Critical passes (one line)
+    if critical_passes:
+        names = [c['name'] for c in critical_passes]
+        lines.append(f"**Critical passed ({len(names)}):** {', '.join(names)}")
+        lines.append("")
+
+    # Warning failures (show details)
+    if warning_fails:
+        lines.append("## Warnings")
+        for c in warning_fails:
+            lines.append(f"- **WARN** `{c['name']}`: {c['message']}")
+            if c.get("details"):
+                lines.extend(_format_details(c["details"], cap=5))
+        lines.append("")
+
+    # Warning passes (one line)
+    if warning_passes:
+        names = [c['name'] for c in warning_passes]
+        lines.append(f"**Warnings passed ({len(names)}):** {', '.join(names)}")
+        lines.append("")
+
+    # Info (compact)
+    if infos:
+        lines.append("## Info")
+        for c in infos:
+            lines.append(f"- `{c['name']}`: {c['message']}")
+            if c.get("details"):
+                lines.extend(_format_details(c["details"], cap=5))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def review_production() -> str:
+    """Run a comprehensive production readiness review on the open font.
+
+    Checks 44 items across critical/warning/info severities:
+
+    **Critical** (must fix): family name, .notdef, space glyph, duplicate unicodes/names,
+    master compatibility, vertical metrics, open paths, valid glyph names,
+    missing components, alignment zones.
+
+    **Warning** (should fix): metadata, version, essential glyphs, .notdef outlines,
+    zone overshoots, Use Typo Metrics, typo/hhea match, win metrics coverage,
+    kerning groups, cross-master kerning, critical kern pairs, OT features,
+    weight classes, style linking, nbspace width, zero-width letters, PANOSE,
+    stems defined, short segments, near-miss alignments, presentation forms
+    decomposition (fi/fl/ff), German sharp S, Dutch IJ localization,
+    smallcap completeness, salt feature, languagesystems prefix, Remove Overlap.
+
+    **Info**: glyph count by category, font metrics, fsType, VF readiness,
+    unreachable glyphs.
+
+    Returns a formatted markdown report with pass/fail status and details for failures.
+    """
+    data = _post("/api/font/production/review", {}, timeout=30)
+    if "error" in data and "ok" not in data:
+        return json.dumps(data)
+    return _format_production_review(data)
+
+
+_GLYPHSETS_AVAILABLE = None
+
+
+_SHAPERGLOT_AVAILABLE = None
+
+
+def _ensure_glyphsets():
+    """Check if glyphsets package is available, import if so."""
+    global _GLYPHSETS_AVAILABLE
+    if _GLYPHSETS_AVAILABLE is None:
+        try:
+            import glyphsets
+            _GLYPHSETS_AVAILABLE = True
+        except ImportError:
+            _GLYPHSETS_AVAILABLE = False
+    return _GLYPHSETS_AVAILABLE
+
+
+def _ensure_shaperglot():
+    """Check if shaperglot package is available, import if so."""
+    global _SHAPERGLOT_AVAILABLE
+    if _SHAPERGLOT_AVAILABLE is None:
+        try:
+            import shaperglot  # noqa: F401
+            _SHAPERGLOT_AVAILABLE = True
+        except ImportError:
+            _SHAPERGLOT_AVAILABLE = False
+    return _SHAPERGLOT_AVAILABLE
+
+
+_GLYPHSET_SHORTCUTS = {
+    "latin_kernel": ["GF_Latin_Kernel"],
+    "latin_core": ["GF_Latin_Core"],
+    "latin_plus": ["GF_Latin_Core", "GF_Latin_Plus"],
+    "latin_all": ["GF_Latin_Core", "GF_Latin_Plus", "GF_Latin_Beyond"],
+    "cyrillic_core": ["GF_Cyrillic_Core"],
+    "cyrillic_plus": ["GF_Cyrillic_Core", "GF_Cyrillic_Plus"],
+    "cyrillic_all": ["GF_Cyrillic_Core", "GF_Cyrillic_Plus", "GF_Cyrillic_Pro"],
+    "greek_core": ["GF_Greek_Core"],
+    "greek_plus": ["GF_Greek_Core", "GF_Greek_Plus"],
+    "greek_all": ["GF_Greek_Core", "GF_Greek_Plus", "GF_Greek_Pro"],
+    "arabic_core": ["GF_Arabic_Core"],
+    "arabic_all": ["GF_Arabic_Core", "GF_Arabic_Plus"],
+}
+
+
+def _resolve_glyphset_names(query: str) -> list[str]:
+    """Resolve a query to a list of glyphset names.
+    Supports exact names, shortcuts, and fuzzy matching."""
+    from glyphsets import defined_glyphsets
+    all_sets = defined_glyphsets()
+
+    # Check shortcut
+    key = query.lower().replace(" ", "_").replace("-", "_")
+    if key in _GLYPHSET_SHORTCUTS:
+        return _GLYPHSET_SHORTCUTS[key]
+
+    # Exact match
+    if query in all_sets:
+        return [query]
+
+    # Case-insensitive exact match
+    for s in all_sets:
+        if s.lower() == query.lower():
+            return [s]
+
+    # Substring match
+    matches = [s for s in all_sets if query.lower() in s.lower()]
+    if matches:
+        return matches
+
+    return []
+
+
+def _format_glyphset_coverage(data: dict) -> str:
+    """Format glyphset coverage check result."""
+    if "error" in data:
+        return f"Error: {data['error']}"
+
+    if "available_sets" in data:
+        # Listing mode
+        lines = ["## Available Google Fonts Glyphsets\n"]
+        for gs in data["available_sets"]:
+            desc = f" — {gs['description']}" if gs.get("description") else ""
+            lines.append(f"- **{gs['name']}** ({gs['count']} glyphs){desc}")
+        lines.append("\n### Shortcuts")
+        lines.append("Use these for common combinations:")
+        for key, sets in sorted(_GLYPHSET_SHORTCUTS.items()):
+            lines.append(f"- `{key}` → {' + '.join(sets)}")
+        return "\n".join(lines)
+
+    # Coverage report
+    lines = []
+    font_name = data.get("fontName", "Font")
+    lines.append(f"## Glyphset Coverage — {font_name}\n")
+
+    for gs_name, info in data.get("sets", {}).items():
+        total = info["total"]
+        present = info["present"]
+        missing_count = info["missing"]
+        pct = info["percentage"]
+
+        status = "PASS" if missing_count == 0 else "INCOMPLETE"
+        lines.append(f"### {gs_name}: {pct}% ({present}/{total}) — {status}\n")
+
+        if info.get("missing_glyphs"):
+            lines.append(f"**Missing ({missing_count}):**")
+            # Group by first letter for readability
+            mg = info["missing_glyphs"]
+            if len(mg) <= 40:
+                lines.append(", ".join(f"`{g}`" for g in mg))
+            else:
+                # Show in columns
+                for i in range(0, len(mg), 8):
+                    chunk = mg[i:i+8]
+                    lines.append("  " + ", ".join(f"`{g}`" for g in chunk))
+            lines.append("")
+
+    if data.get("added"):
+        lines.append(f"\n### Added {data['added']} missing glyphs")
+        lines.append(f"Glyphs marked with **blue** color label in GlyphsApp for easy filtering.")
+        if data.get("added_glyphs"):
+            ag = data["added_glyphs"]
+            if len(ag) <= 40:
+                lines.append(", ".join(f"`{g}`" for g in ag))
+            else:
+                for i in range(0, len(ag), 8):
+                    chunk = ag[i:i+8]
+                    lines.append("  " + ", ".join(f"`{g}`" for g in chunk))
+
+    if data.get("summary"):
+        s = data["summary"]
+        lines.append(f"\n**Total**: {s['total_required']} required, "
+                     f"{s['total_present']} present, {s['total_missing']} missing "
+                     f"({s['overall_percentage']}%)")
+
+    return "\n".join(lines)
+
+
+def _language_display_name(language) -> str:
+    """Best-effort display name for a shaperglot language object."""
+    if hasattr(language, "name"):
+        return str(language.name)
+    try:
+        name = language.get("name")
+        if name:
+            return str(name)
+    except AttributeError:
+        pass
+    try:
+        return str(language["name"])
+    except Exception:
+        return "Unknown"
+
+
+def _collect_problem_messages(results) -> list[str]:
+    messages = []
+    for result in results or []:
+        try:
+            problems = result.problems
+        except AttributeError:
+            problems = []
+        if problems:
+            for problem in problems:
+                msg = getattr(problem, "message", None)
+                if msg:
+                    messages.append(str(msg))
+                elif hasattr(problem, "code"):
+                    messages.append(str(problem.code))
+        else:
+            msg = getattr(result, "message", None)
+            if msg:
+                messages.append(str(msg))
+    deduped = []
+    seen = set()
+    for message in messages:
+        if message not in seen:
+            deduped.append(message)
+            seen.add(message)
+    return deduped
+
+
+def _format_shaperglot_results(
+    *,
+    font_name: str,
+    instance_name: str,
+    format_name: str,
+    checked_results: list[dict],
+    threshold: int,
+    max_results: int,
+    requested_languages: list[str],
+) -> str:
+    lines = [
+        f"## Language Support — {font_name}",
+        "",
+        f"Instance: `{instance_name}`",
+        f"Export format: `{format_name}`",
+        f"Support threshold: `{threshold}%`",
+        "",
+    ]
+
+    if requested_languages:
+        for entry in checked_results:
+            lines.append(
+                f"### {entry['lang_id']} ({entry['name']}): "
+                f"{entry['score']}% — {entry['support_level']}"
+            )
+            lines.append(f"Summary: {entry['summary']}")
+            if entry["fixes_required"] is not None:
+                lines.append(f"Fixes required: {entry['fixes_required']}")
+            if entry["warnings"]:
+                lines.append("Warnings:")
+                for warning in entry["warnings"][:12]:
+                    lines.append(f"- {warning}")
+            if entry["failures"]:
+                lines.append("Failures:")
+                for failure in entry["failures"][:12]:
+                    lines.append(f"- {failure}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    supported = [r for r in checked_results if r["score"] >= threshold]
+    supported.sort(key=lambda item: (-item["score"], item["lang_id"]))
+
+    level_counts = {}
+    for entry in checked_results:
+        level_counts[entry["support_level"]] = level_counts.get(entry["support_level"], 0) + 1
+
+    total = len(checked_results)
+    lines.append(f"Supported languages at >= `{threshold}%`: `{len(supported)}/{total}`")
+    if level_counts:
+        summary_bits = [f"`{k}`={v}" for k, v in sorted(level_counts.items())]
+        lines.append("Support levels: " + ", ".join(summary_bits))
+    lines.append("")
+
+    if not supported:
+        lines.append("No languages reached the requested threshold.")
+        return "\n".join(lines)
+
+    lines.append(f"Top {min(max_results, len(supported))} supported languages:")
+    for entry in supported[:max_results]:
+        lines.append(
+            f"- `{entry['lang_id']}` ({entry['name']}) — {entry['score']}% [{entry['support_level']}]"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def check_language_support(
+    languages: list[str] = [],
+    instance_name: str = "",
+    export_format: str = "otf",
+    support_threshold: int = 80,
+    max_results: int = 50,
+) -> str:
+    """Check the open font's language support with Shaperglot.
+
+    Exports a temporary binary from the active Glyphs font, then runs
+    Shaperglot against it. With no languages provided, returns the
+    languages whose score meets `support_threshold`. With `languages`,
+    returns per-language scores plus warnings/failures.
+
+    Args:
+        languages: Optional language IDs or names, e.g. ["en_Latn", "Turkish", "Navajo"]
+        instance_name: Optional Glyphs instance name to export. Empty = first exportable instance.
+        export_format: "otf" (default) or "ttf"
+        support_threshold: Minimum score to count a language as supported in report mode
+        max_results: Max languages to show in report mode
+    """
+    if not _ensure_shaperglot():
+        return "Error: `shaperglot` package not installed. Run: pip install shaperglot"
+
+    export_result = _post(
+        "/api/font/export-instance",
+        {"instanceName": instance_name, "format": export_format},
+        timeout=60,
+    )
+    if "error" in export_result and "ok" not in export_result:
+        return f"Error exporting font: {export_result['error']}"
+
+    font_data_b64 = export_result.get("fontData")
+    if not font_data_b64:
+        return "Error exporting font: missing font data"
+
+    from shaperglot import Checker, Languages
+
+    temp_path = None
+    try:
+        suffix = "." + export_result.get("format", export_format or "otf").lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as fh:
+            fh.write(base64.b64decode(font_data_b64))
+            temp_path = fh.name
+
+        checker = Checker(temp_path)
+        langs = Languages()
+
+        requested = []
+        if languages:
+            for query in languages:
+                candidates = []
+                if hasattr(langs, "disambiguate"):
+                    candidates = list(langs.disambiguate(query))
+                if not candidates:
+                    try:
+                        candidates = [query] if query in langs.keys() else []
+                    except Exception:
+                        candidates = []
+                if not candidates:
+                    requested.append({
+                        "lang_id": str(query),
+                        "name": "Unknown",
+                        "score": 0,
+                        "support_level": "unknown",
+                        "summary": f"Language '{query}' not found in Shaperglot database.",
+                        "fixes_required": None,
+                        "warnings": [],
+                        "failures": [],
+                    })
+                    continue
+                for lang_id in candidates:
+                    language = langs[lang_id]
+                    reporter = checker.check(language)
+                    requested.append({
+                        "lang_id": str(lang_id),
+                        "name": _language_display_name(language),
+                        "score": round(float(reporter.score), 1),
+                        "support_level": str(reporter.support_level),
+                        "summary": str(reporter.to_summary_string(language)),
+                        "fixes_required": getattr(reporter, "fixes_required", None),
+                        "warnings": _collect_problem_messages(getattr(reporter, "warns", [])),
+                        "failures": _collect_problem_messages(getattr(reporter, "fails", [])),
+                    })
+        else:
+            requested = []
+            for lang_id in sorted(langs.keys()):
+                language = langs[lang_id]
+                reporter = checker.check(language)
+                requested.append({
+                    "lang_id": str(lang_id),
+                    "name": _language_display_name(language),
+                    "score": round(float(reporter.score), 1),
+                    "support_level": str(reporter.support_level),
+                    "summary": str(reporter.to_summary_string(language)),
+                    "fixes_required": getattr(reporter, "fixes_required", None),
+                    "warnings": [],
+                    "failures": [],
+                })
+
+        return _format_shaperglot_results(
+            font_name=export_result.get("familyName", "Font"),
+            instance_name=export_result.get("instanceName", instance_name or "Unknown"),
+            format_name=export_result.get("format", export_format),
+            checked_results=requested,
+            threshold=support_threshold,
+            max_results=max_results,
+            requested_languages=list(languages or []),
+        )
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+@mcp.tool()
+def check_glyphset_coverage(
+    glyphset: str = "",
+    add_missing: bool = False,
+) -> str:
+    """Check font coverage against Google Fonts glyphset definitions.
+
+    With no arguments, lists all available glyphsets. With a glyphset name,
+    reports which glyphs are present and which are missing.
+
+    Use add_missing=True to create empty glyphs for all missing characters,
+    ready for the designer to draw.
+
+    Args:
+        glyphset: Glyphset name or shortcut. Examples:
+            "GF_Latin_Core" — required for Google Fonts onboarding (324 glyphs)
+            "GF_Latin_Plus" — extended Latin (141 additional glyphs)
+            "latin_core" — shortcut for GF_Latin_Core
+            "latin_plus" — shortcut for GF_Latin_Core + GF_Latin_Plus (465 total)
+            "latin_all" — shortcut for Core + Plus + Beyond (598 total)
+            "cyrillic_core", "greek_core", "arabic_core" — other scripts
+            Empty string — list all available glyphsets and shortcuts
+        add_missing: If True, create empty glyphs for all missing characters
+            in the font. New glyphs are marked with blue color label.
+    """
+    if not _ensure_glyphsets():
+        return "Error: `glyphsets` package not installed. Run: pip install glyphsets"
+
+    from glyphsets import defined_glyphsets, glyphs_in_glyphset, get_glyphset_definition
+
+    # ── List mode ──
+    if not glyphset:
+        all_sets = sorted(defined_glyphsets())
+        available = []
+        for name in all_sets:
+            defn = get_glyphset_definition(name)
+            gs_glyphs = glyphs_in_glyphset(name)
+            available.append({
+                "name": name,
+                "count": len(gs_glyphs),
+                "description": defn.get("description", ""),
+            })
+        return _format_glyphset_coverage({"available_sets": available})
+
+    # ── Resolve glyphset name(s) ──
+    resolved = _resolve_glyphset_names(glyphset)
+    if not resolved:
+        all_sets = defined_glyphsets()
+        return (f"Glyphset '{glyphset}' not found.\n\n"
+                f"Available: {', '.join(sorted(all_sets))}\n\n"
+                f"Shortcuts: {', '.join(sorted(_GLYPHSET_SHORTCUTS.keys()))}")
+
+    # ── Get font's glyph list ──
+    font_data = _get("/api/font/glyphs")
+    if "error" in font_data:
+        return f"Error getting font data: {font_data['error']}"
+
+    font_info = _get("/api/font")
+    font_name = font_info.get("familyName", "Unknown") if "error" not in font_info else "Unknown"
+
+    font_glyph_names = set()
+    for g in font_data.get("glyphs", []):
+        font_glyph_names.add(g["name"])
+
+    # ── Check coverage per set ──
+    result = {"fontName": font_name, "sets": {}}
+    all_missing = []
+
+    for gs_name in resolved:
+        target_glyphs = glyphs_in_glyphset(gs_name)
+        target_set = set(target_glyphs)
+
+        present = target_set & font_glyph_names
+        missing = sorted(target_set - font_glyph_names)
+
+        pct = round(len(present) / len(target_set) * 100, 1) if target_set else 100.0
+
+        result["sets"][gs_name] = {
+            "total": len(target_set),
+            "present": len(present),
+            "missing": len(missing),
+            "percentage": pct,
+            "missing_glyphs": missing,
+        }
+        all_missing.extend(missing)
+
+    # Deduplicate across sets
+    all_missing = sorted(set(all_missing))
+
+    # Summary
+    total_required = sum(s["total"] for s in result["sets"].values())
+    total_present = sum(s["present"] for s in result["sets"].values())
+    total_missing_unique = len(all_missing)
+    overall_pct = round((1 - total_missing_unique / max(1, total_required)) * 100, 1)
+    result["summary"] = {
+        "total_required": total_required,
+        "total_present": total_present,
+        "total_missing": total_missing_unique,
+        "overall_percentage": overall_pct,
+    }
+
+    # ── Add missing glyphs ──
+    if add_missing and all_missing:
+        bulk_body = {
+            "glyphs": [{"name": name} for name in all_missing],
+            "color": 7,  # blue
+        }
+        add_result = _post("/api/font/glyphs/bulk-create", bulk_body, timeout=30)
+        if add_result.get("ok"):
+            result["added"] = add_result.get("created", 0)
+            result["added_glyphs"] = add_result.get("createdGlyphs", [])
+        else:
+            result["add_error"] = add_result.get("error", "Unknown error")
+
+    return _format_glyphset_coverage(result)
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
