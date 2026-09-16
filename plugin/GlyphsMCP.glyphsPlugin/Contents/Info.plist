@@ -8,6 +8,8 @@
 	<string>plugin</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.nico.glyphsmcp</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>GlyphsMCP</string>
 	<key>CFBundlePackageType</key>
@@ -20,5 +22,9 @@
 	<string>1</string>
 	<key>NSPrincipalClass</key>
 	<string>GlyphsMCP</string>
+	<key>PyMainFileNames</key>
+	<array>
+		<string>plugin.py</string>
+	</array>
 </dict>
 </plist>

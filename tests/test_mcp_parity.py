@@ -122,6 +122,43 @@ class PluginRouteTests(unittest.TestCase):
         }
         self.assertIn("objc", imported_names)
 
+    def test_manual_server_toggle_shows_start_and_stop_alerts(self):
+        tree = ast.parse(PLUGIN_PATH.read_text())
+        plugin_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "GlyphsMCP"
+        )
+        methods = {
+            node.name: node
+            for node in plugin_class.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("_showServerStatusAlert", methods)
+        alert_calls = [
+            node for node in ast.walk(methods["toggleServer_"])
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_showServerStatusAlert"
+        ]
+        self.assertEqual(len(alert_calls), 2)
+
+    def test_connect_menu_exposes_supported_clients(self):
+        source = PLUGIN_PATH.read_text()
+        for label in (
+            "Claude Code…",
+            "Codex / ChatGPT Desktop…",
+            "OpenCode…",
+            "Visual Studio Code…",
+            "Cursor…",
+            "Other MCP Client…",
+        ):
+            self.assertIn(label, source)
+        self.assertNotIn("Copy Config for Visual Studio Code", source)
+
+    def test_opencode_default_install_path_is_discoverable(self):
+        source = PLUGIN_PATH.read_text()
+        self.assertIn('~/.opencode/bin/opencode', source)
+
     def test_recipe_crud_and_step_parsing(self):
         with tempfile.TemporaryDirectory() as directory:
             fake_file = Path(directory) / "handlers.py"

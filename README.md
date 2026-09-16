@@ -12,7 +12,7 @@ MCP Client  ←(stdio/MCP)→  MCP Server  ←(HTTP/localhost)→  GlyphsApp Plu
 
 ## Requirements
 
-- [Glyphs 3 o 4](https://glyphsapp.com)
+- [Glyphs 3 or 4](https://glyphsapp.com)
 - An MCP client
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - `glyphsets` and `shaperglot` (installed automatically with the MCP package)
@@ -29,26 +29,34 @@ Restart GlyphsApp. You should see **GlyphsMCP** under the _Window_ menu.
 
 ### 2. Connect your MCP client
 
-**Claude Code:**
+Open _Window > GlyphsMCP > Connect_ and choose your client:
 
-```bash
-claude mcp add glyphs-mcp -- uvx glyphs-mcp
-```
+- **Claude Code** — registers a user-scoped stdio server with the official `claude` CLI.
+- **Codex / ChatGPT Desktop** — registers the server with `codex`; both apps share this configuration.
+- **OpenCode** — adds the server to OpenCode's global configuration; restart OpenCode afterward.
+- **Visual Studio Code** — adds the server to your active user profile with `code --add-mcp`.
+- **Cursor** — safely merges the server into `~/.cursor/mcp.json` and backs up an existing file first.
+- **Other MCP Client** — copies a portable `mcpServers` JSON block to the clipboard.
 
-**Cursor / VS Code** — add to your MCP config:
+Glyphs 3 and Glyphs 4 are registered separately as `glyphs-3` and `glyphs-4`, using the port currently configured in each app. If a client CLI is not available to GlyphsApp, the equivalent Terminal command is copied to the clipboard instead.
+
+For manual setup, use the endpoint shown when starting the GlyphsMCP server. For example:
 
 ```json
 {
   "mcpServers": {
-    "glyphs-mcp": {
+    "glyphs-4": {
       "command": "uvx",
-      "args": ["glyphs-mcp"]
+      "args": ["glyphs-mcp"],
+      "env": {
+        "GLYPHS_URL": "http://127.0.0.1:7746"
+      }
     }
   }
 }
 ```
 
-That's it.
+Claude Desktop now recommends Desktop Extensions (`.mcpb`) for local MCP servers. A GlyphsMCP Desktop Extension is planned separately and is not installed by this menu yet.
 
 ### 3. Use it
 
@@ -168,7 +176,7 @@ Tools with side effects are explicit: kerning-group analysis can assign groups a
 The plugin adds a **GlyphsMCP** submenu under _Window_ in the menu bar:
 
 - **Start/Stop Server** — toggle the HTTP server
-- **Connect** — copy ready-to-paste MCP config for Claude Code or VS Code (and forks)
+- **Connect** — register GlyphsMCP with Claude Code, Codex/ChatGPT Desktop, OpenCode, VS Code, Cursor, or copy a generic configuration
 - **Documentation** — open this page in your browser
 - **Allow Execute Endpoint** — enable `execute_in_glyphs` (off by default for security)
 
@@ -182,9 +190,9 @@ The plugin adds a **GlyphsMCP** submenu under _Window_ in the menu bar:
 
 ## How it works
 
-The GlyphsApp plugin runs an HTTP server on `127.0.0.1:7745` inside GlyphsApp. All GlyphsApp API calls run on the main thread via a queue + NSTimer bridge for thread safety.
+The GlyphsApp plugin runs an HTTP server on `127.0.0.1` using the configured port (`7745` by default). All GlyphsApp API calls run on the main thread via a queue + NSTimer bridge for thread safety.
 
-The MCP server is a thin translation layer — it receives MCP tool calls via stdio and forwards them as HTTP requests to the plugin.
+The MCP server is a thin translation layer — it receives MCP tool calls via stdio and forwards them to the plugin URL supplied through `GLYPHS_URL`.
 
 ## Roadmap
 

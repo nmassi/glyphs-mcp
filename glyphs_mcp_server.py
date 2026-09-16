@@ -23,7 +23,7 @@ from font_name_check import check_font_name as _check_font_name
 
 mcp = FastMCP("glyphs-mcp")
 
-GLYPHS_URL = "http://127.0.0.1:7745"
+GLYPHS_URL = os.environ.get("GLYPHS_URL", "http://127.0.0.1:7745").rstrip("/")
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -2870,5 +2870,10 @@ def check_glyphset_coverage(
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
+    """Run the stdio MCP server."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
