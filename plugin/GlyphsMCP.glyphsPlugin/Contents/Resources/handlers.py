@@ -6681,6 +6681,59 @@ def handle_bulk_create_glyphs(bridge, body=None, **kwargs):
 	return 201, result
 
 
+@route("POST", "/api/font/export-source")
+def handle_export_source(bridge, body=None, **kwargs):
+	"""Prepare the open font's saved source for an external glyphs-cli export."""
+	body = body or {}
+	save_before_export = bool(body.get("saveBeforeExport", False))
+
+	def _run():
+		import os
+		from Foundation import NSBundle
+
+		font = _require_font()
+		source_path = _glyphs_string(getattr(font, "filepath", None))
+		if not source_path:
+			return {
+				"error": "The open font has no file path. Save it before exporting.",
+				"code": "font_not_saved",
+			}
+
+		document = getattr(font, "parent", None)
+		is_edited = getattr(document, "isDocumentEdited", None)
+		has_unsaved_changes = bool(is_edited()) if callable(is_edited) else False
+		if has_unsaved_changes and not save_before_export:
+			return {
+				"error": (
+					"The open font has unsaved changes. Re-run with "
+					"save_before_export=True after confirming the save."
+				),
+				"code": "unsaved_changes",
+				"sourcePath": source_path,
+			}
+
+		if has_unsaved_changes:
+			font.save()
+			if callable(is_edited) and is_edited():
+				return {"error": "Glyphs could not save the open font", "code": "save_failed"}
+
+		if not os.path.exists(source_path):
+			return {"error": f"Saved source not found: {source_path}", "code": "source_missing"}
+
+		return {
+			"ok": True,
+			"sourcePath": source_path,
+			"familyName": str(font.familyName),
+			"appPath": _glyphs_string(NSBundle.mainBundle().bundlePath()),
+		}
+
+	result = bridge.execute_on_main(_run)
+	if isinstance(result, dict) and "error" in result and "ok" not in result:
+		status = 409 if result.get("code") == "unsaved_changes" else 400
+		return status, result
+	return 200, result
+
+
 @route("POST", "/api/font/export-instance")
 def handle_export_instance(bridge, body=None, **kwargs):
 	"""Export an instance to a temporary binary and return it as base64."""

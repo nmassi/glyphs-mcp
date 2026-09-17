@@ -103,6 +103,7 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | `delete_kerning_pair`  | Remove a kerning pair                                                  |
 | `set_feature_code`     | Create or update an OpenType feature                                   |
 | `generate_box_drawing` | Generate U+2500–U+259F outlines across masters; can overwrite drawings |
+| `export_font`          | Export OTF, TTF, WOFF, WOFF2, and variable TTF beside the saved source |
 
 ### Analysis
 
@@ -169,7 +170,17 @@ Recipe creation and deletion modify files in the installed plugin's `Resources/r
 
 All tools accept an optional `master_id` parameter. When omitted, read/write tools use the first master. Analysis tools analyze all masters and return per-master results.
 
-Tools with side effects are explicit: kerning-group analysis can assign groups and color glyphs; auto-kern can write kerning; glyphset coverage can add empty blue-labelled glyphs; box drawing creates or replaces outlines; smart scale modifies outlines and can create backup layers; recipe CRUD writes or deletes markdown files. Use dry-run/preview options where available and save the font before bulk operations.
+Tools with side effects are explicit: kerning-group analysis can assign groups and color glyphs; auto-kern can write kerning; glyphset coverage can add empty blue-labelled glyphs; box drawing creates or replaces outlines; smart scale modifies outlines and can create backup layers; recipe CRUD writes or deletes markdown files. `export_font` writes a new timestamped directory under `export/` beside the saved source and never removes previous exports. Use dry-run/preview options where available and save the font before bulk operations.
+
+## Font export
+
+Ask the agent to export the open font, or run the bundled CLI directly:
+
+```sh
+uvx --from glyphs-mcp export-glyphs /path/to/MyFont.glyphs
+```
+
+Both paths use the official `glyphs-cli`, installed automatically with the GlyphsMCP server package on macOS. Glyphs Plugin Manager installs only the app plugin; `uvx glyphs-mcp` provisions the server and export CLI on first use. Each run creates `export/YYYY-MM-DD_HH-MM-SS/` beside the source, with separate `otf`, `ttf`, `woff`, `woff2`, and `variable` directories as applicable, plus `export-report.jsonl`. The MCP tool refuses to export unsaved changes unless `save_before_export=True` is explicitly requested.
 
 ## Menu
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0 — 2026-09-17
+
+### New features
+
+- **Agent-driven font export** (`export_font`) — exports the open saved source as static OTF, TTF, WOFF, and WOFF2 files plus variable TTF when configured. Every run writes to a new `export/YYYY-MM-DD_HH-MM-SS/` directory and preserves previous exports.
+- **Bundled export CLI** (`export-glyphs`) — exposes the same timestamped export workflow from Terminal. The official `glyphs-cli` is installed automatically as a macOS dependency of GlyphsMCP.
+
+### Safety
+
+- Fonts with unsaved changes require explicit `save_before_export=True` confirmation.
+- Export destinations are fixed beside the source and no existing output directory is removed or overwritten.
+
 ## v0.2.0 — 2026-02-25
 
 ### New features

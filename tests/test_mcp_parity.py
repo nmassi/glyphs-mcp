@@ -1,8 +1,12 @@
 import ast
+import io
 import importlib.util
+import json
 import sys
 import tempfile
+import types
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +19,7 @@ PLUGIN_PATH = ROOT / "plugin/GlyphsMCP.glyphsPlugin/Contents/Resources/plugin.py
 NEW_TOOLS = {
     "analyze_kerning_groups", "auto_kern", "check_font_name",
     "check_glyphset_coverage", "check_language_support", "create_recipe",
-    "delete_recipe", "generate_box_drawing", "get_recipe", "get_recipe_step",
+    "delete_recipe", "export_font", "generate_box_drawing", "get_recipe", "get_recipe_step",
     "list_recipes", "review_production", "smart_scale",
 }
 
@@ -29,7 +33,7 @@ def load_handlers():
 
 
 class MCPToolCatalogTests(unittest.TestCase):
-    def test_catalog_has_exactly_54_tools_and_excludes_proofing(self):
+    def test_catalog_has_exactly_55_tools_and_excludes_proofing(self):
         tree = ast.parse((ROOT / "glyphs_mcp_server.py").read_text())
         tools = {
             node.name
@@ -42,8 +46,8 @@ class MCPToolCatalogTests(unittest.TestCase):
                 for decorator in node.decorator_list
             )
         }
-        self.assertEqual(len(tools), 54)
-        self.assertEqual(len(server.mcp._tool_manager._tools), 54)
+        self.assertEqual(len(tools), 55)
+        self.assertEqual(len(server.mcp._tool_manager._tools), 55)
         self.assertTrue(NEW_TOOLS <= tools)
         self.assertTrue({"init_font_proof", "generate_font_proof"}.isdisjoint(tools))
 
@@ -73,6 +77,41 @@ class MCPToolCatalogTests(unittest.TestCase):
         server.get_kerning(master_id="M1", left="A", limit=50)
         get.assert_called_once_with("/api/font/kerning?master=M1&left=A&limit=50")
 
+    @patch.object(server, "_export_source", return_value={"ok": True, "exportedFiles": []})
+    @patch.object(server, "_post", return_value={
+        "ok": True,
+        "sourcePath": "/fonts/Family.glyphs",
+        "appPath": "/Applications/Glyphs 4.app",
+    })
+    def test_export_font_prepares_source_and_runs_shared_exporter(self, post, export_source):
+        result = server.export_font(save_before_export=True, timeout=600)
+
+        post.assert_called_once_with(
+            "/api/font/export-source",
+            {"saveBeforeExport": True},
+            timeout=30,
+        )
+        export_source.assert_called_once_with(
+            "/fonts/Family.glyphs",
+            app="/Applications/Glyphs 4.app",
+            plugins="",
+            timeout=600,
+        )
+        self.assertTrue(result["ok"])
+
+    @patch.object(server.urllib.request, "urlopen")
+    def test_post_preserves_structured_http_errors(self, urlopen):
+        payload = {"error": "Unsaved changes", "code": "unsaved_changes"}
+        urlopen.side_effect = urllib.error.HTTPError(
+            "http://127.0.0.1/api/font/export-source",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+        )
+
+        self.assertEqual(server._post("/api/font/export-source", {}), payload)
+
 
 class PluginRouteTests(unittest.TestCase):
     @classmethod
@@ -82,6 +121,7 @@ class PluginRouteTests(unittest.TestCase):
     def test_required_internal_routes_are_registered(self):
         expected = {
             ("POST", "/api/font/glyphs/bulk-create"),
+            ("POST", "/api/font/export-source"),
             ("POST", "/api/font/export-instance"),
             ("POST", "/api/font/box-drawing/generate"),
             ("POST", "/api/font/kerning/groups/analyze"),
@@ -99,6 +139,56 @@ class PluginRouteTests(unittest.TestCase):
         )
         self.assertIsNone(error)
         self.assertGreaterEqual(len(paths), 2)
+
+    def test_export_source_requires_confirmation_before_saving(self):
+        class Document:
+            edited = True
+
+            def isDocumentEdited(self):
+                return self.edited
+
+        class Font:
+            familyName = "Family"
+
+            def __init__(self, path):
+                self.filepath = str(path)
+                self.parent = Document()
+
+            def save(self):
+                self.parent.edited = False
+
+        class Bridge:
+            @staticmethod
+            def execute_on_main(callback):
+                return callback()
+
+        bundle = types.SimpleNamespace(
+            mainBundle=lambda: types.SimpleNamespace(
+                bundlePath=lambda: "/Applications/Glyphs 4.app"
+            )
+        )
+        foundation = types.SimpleNamespace(NSBundle=bundle)
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Family.glyphs"
+            source.touch()
+            font = Font(source)
+            with patch.object(self.handlers, "_require_font", return_value=font), patch.dict(
+                sys.modules, {"Foundation": foundation}
+            ):
+                status, blocked = self.handlers.handle_export_source(
+                    Bridge(), body={"saveBeforeExport": False}
+                )
+                self.assertEqual((status, blocked["code"]), (409, "unsaved_changes"))
+                self.assertTrue(font.parent.edited)
+
+                status, prepared = self.handlers.handle_export_source(
+                    Bridge(), body={"saveBeforeExport": True}
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(prepared["ok"])
+                self.assertFalse(font.parent.edited)
+                self.assertEqual(prepared["sourcePath"], str(source))
 
     def test_rmx_parameter_values_resolve_per_master(self):
         class Master:

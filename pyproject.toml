@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "glyphs-mcp"
-version = "0.2.6"
+version = "0.3.0"
 description = "MCP bridge for AI-assisted type design in GlyphsApp"
 readme = "README.md"
 license = "MIT"
@@ -22,6 +22,7 @@ classifiers = [
 dependencies = [
     "mcp[cli]>=1.0.0,<2",
     "glyphsets",
+    "glyphs-cli>=0.6.2,<0.7; sys_platform == 'darwin'",
     "shaperglot",
 ]
 
@@ -31,11 +32,13 @@ Issues = "https://github.com/nmassi/glyphs-mcp/issues"
 
 [project.scripts]
 glyphs-mcp = "glyphs_mcp_server:main"
+export-glyphs = "glyphs_export:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 include = [
     "glyphs_mcp_server.py",
+    "glyphs_export.py",
     "font_name_check.py",
     "plugin/GlyphsMCP.glyphsPlugin/Contents/Resources/recipes/*.md",
 ]
@@ -45,4 +48,5 @@ exclude = [
     "/.venv",
     "/dist",
     "/tests",
+    "/uv.lock",
 ]

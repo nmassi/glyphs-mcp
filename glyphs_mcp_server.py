@@ -20,6 +20,7 @@ import urllib.error
 import base64
 from mcp.server.fastmcp import FastMCP
 from font_name_check import check_font_name as _check_font_name
+from glyphs_export import export_source as _export_source
 
 mcp = FastMCP("glyphs-mcp")
 
@@ -66,6 +67,11 @@ def _post(path: str, body: dict, timeout: int = 15) -> dict:
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read())
+        except Exception:
+            return {"error": f"GlyphsApp plugin returned HTTP {e.code}: {e.reason}"}
     except urllib.error.URLError as e:
         return {"error": f"Cannot connect to GlyphsApp plugin at {url}. Is GlyphsApp running with GlyphsMCP plugin? ({e})"}
     except Exception as e:
@@ -1820,6 +1826,40 @@ def generate_box_drawing(
         "color": color,
     }
     return _post("/api/font/box-drawing/generate", body, timeout=60)
+
+
+@mcp.tool()
+def export_font(
+    save_before_export: bool = False,
+    timeout: int = 300,
+) -> dict:
+    """Export the open font beside its saved source with glyphs-cli.
+
+    Creates ``export/YYYY-MM-DD_HH-MM-SS`` next to the open ``.glyphs`` or
+    ``.glyphspackage`` source. Static instances are exported as OTF, TTF,
+    WOFF, and WOFF2. Variable instances are exported as variable TTF files.
+    Previous export directories are never removed or overwritten.
+
+    Args:
+        save_before_export: Save pending changes before exporting. Defaults to
+            False; if the document is edited, the tool asks for confirmation
+            instead of silently saving it.
+        timeout: Maximum seconds for each of the three export runs.
+    """
+    prepared = _post(
+        "/api/font/export-source",
+        {"saveBeforeExport": save_before_export},
+        timeout=30,
+    )
+    if not prepared.get("ok"):
+        return prepared
+
+    return _export_source(
+        prepared["sourcePath"],
+        app=prepared.get("appPath", ""),
+        plugins="",
+        timeout=timeout,
+    )
 
 
 @mcp.tool()
