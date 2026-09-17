@@ -180,7 +180,7 @@ Ask the agent to export the open font, or run the bundled CLI directly:
 uvx --from glyphs-mcp export-glyphs /path/to/MyFont.glyphs
 ```
 
-Both paths use the official `glyphs-cli`, installed automatically with the GlyphsMCP server package on macOS. Glyphs Plugin Manager installs only the app plugin; `uvx glyphs-mcp` provisions the server and export CLI on first use. Each run creates `export/YYYY-MM-DD_HH-MM-SS/` beside the source, with separate `otf`, `ttf`, `woff`, `woff2`, and `variable` directories as applicable, plus `export-report.jsonl`. The MCP tool refuses to export unsaved changes unless `save_before_export=True` is explicitly requested.
+Both paths use the official `glyphs-cli`, installed automatically with the GlyphsMCP server package on macOS. Glyphs Plugin Manager installs only the app plugin; `uvx glyphs-mcp` provisions the server and export CLI on first use. Each run creates `export/YYYY-MM-DD_HH-MM-SS/` beside the source, with separate `otf`, `ttf`, `woff`, `woff2`, and `variable` directories as applicable, plus `export-report.jsonl`. The MCP tool refuses to export unsaved changes unless `save_before_export=True` is explicitly requested. Every result includes an `exportLog` that the calling agent must show after both successful and failed attempts.
 
 ## Menu
 

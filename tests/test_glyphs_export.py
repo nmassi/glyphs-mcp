@@ -90,6 +90,8 @@ class GlyphsExportTests(unittest.TestCase):
             self.assertEqual(Path(first["outputDirectory"]).name, "2026-09-17_12-34-56")
             self.assertEqual(Path(second["outputDirectory"]).name, "2026-09-17_12-34-56_2")
             self.assertEqual(first["warnings"], ["Variable warning"])
+            self.assertIn("Status: SUCCESS", first["exportLog"])
+            self.assertIn("Exported files: 5", first["exportLog"])
             self.assertTrue(Path(first["reportPath"]).is_file())
             self.assertFalse((Path(first["outputDirectory"]) / ".glyphs-cli-tmp").exists())
             self.assertTrue(all("--plugins" in command for command in first["commands"]))
@@ -107,12 +109,23 @@ class GlyphsExportTests(unittest.TestCase):
         )
         self.assertNotIn("instances", variable["sourceFiles"][0])
 
+    def test_problem_text_omits_transient_instance_paths(self):
+        problem = {
+            "title": "Black",
+            "instancePath": "/tmp/export/Family-Black.otf",
+            "description": "Stems can't be zero.",
+        }
+
+        self.assertEqual(glyphs_export._problem_text(problem), "Black: Stems can't be zero.")
+
     def test_export_rejects_missing_or_invalid_sources(self):
         missing = glyphs_export.export_source("missing.glyphs", glyphs_executable="/fake/glyphs")
         invalid = glyphs_export.export_source(__file__, glyphs_executable="/fake/glyphs")
 
         self.assertFalse(missing["ok"])
         self.assertIn("Source not found", missing["error"])
+        self.assertIn("Status: FAILED", missing["exportLog"])
+        self.assertIn("Source not found", missing["exportLog"])
         self.assertFalse(invalid["ok"])
         self.assertIn("Source must be", invalid["error"])
 

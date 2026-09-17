@@ -25,6 +25,40 @@ EXPORT_RUNS = (
 )
 
 
+def format_export_log(result: dict) -> str:
+    """Build the user-facing log returned by both the CLI and MCP tool."""
+    lines = ["## Glyphs export log", f"Status: {'SUCCESS' if result.get('ok') else 'FAILED'}"]
+    if result.get("sourcePath"):
+        lines.append(f"Source: {result['sourcePath']}")
+    if result.get("outputDirectory"):
+        lines.append(f"Output: {result['outputDirectory']}")
+
+    exported_files = result.get("exportedFiles", [])
+    lines.append(f"Exported files: {len(exported_files)}")
+    lines.extend(f"- {path}" for path in exported_files)
+
+    warnings = result.get("warnings", [])
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in warnings)
+
+    errors = list(result.get("errors", []))
+    if result.get("error"):
+        errors.insert(0, result["error"])
+    if errors:
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in dict.fromkeys(errors) if error)
+
+    if result.get("reportPath"):
+        lines.append(f"Report: {result['reportPath']}")
+    return "\n".join(lines)
+
+
+def _with_export_log(result: dict) -> dict:
+    result["exportLog"] = format_export_log(result)
+    return result
+
+
 def find_glyphs_cli() -> str | None:
     """Find the glyphs-cli executable, preferring this tool's environment."""
     candidates = [
@@ -85,7 +119,9 @@ def _export_config(
 
 def _problem_text(problem: object) -> str:
     if isinstance(problem, dict):
-        parts = [problem.get("title"), problem.get("instancePath"), problem.get("description")]
+        parts = [problem.get("title"), problem.get("description")]
+        if not any(parts):
+            parts.append(problem.get("instancePath"))
         return ": ".join(str(part) for part in parts if part)
     return str(problem)
 
@@ -111,8 +147,10 @@ def _collect_report(
             errors.append(f"Invalid glyphs-cli report: {error}")
             continue
 
-        warnings.extend(_problem_text(item) for item in report.get("warnings", []))
-        errors.extend(_problem_text(item) for item in report.get("errors", []))
+        report_warnings = [_problem_text(item) for item in report.get("warnings", [])]
+        report_errors = [_problem_text(item) for item in report.get("errors", [])]
+        warnings.extend(report_warnings)
+        errors.extend(report_errors)
         exported_path = report.get("exportFilePath")
         if exported_path:
             generated = Path(exported_path)
@@ -133,7 +171,7 @@ def _collect_report(
                     shutil.move(str(generated), str(target))
                     report["exportFilePath"] = str(target)
                     exported_files.append(str(target))
-            elif directory_name:
+            elif directory_name and not report_errors:
                 errors.append(f"Exported file is missing: {generated}")
 
         final_report.write(json.dumps(report, ensure_ascii=False) + "\n")
@@ -152,14 +190,19 @@ def export_source(
     try:
         source_path = _validated_source(source)
     except ValueError as error:
-        return {"ok": False, "error": str(error)}
+        return _with_export_log({
+            "ok": False,
+            "sourcePath": str(Path(source).expanduser()),
+            "error": str(error),
+        })
 
     glyphs_bin = glyphs_executable or find_glyphs_cli()
     if not glyphs_bin:
-        return {
+        return _with_export_log({
             "ok": False,
+            "sourcePath": str(source_path),
             "error": "glyphs-cli executable `glyphs` was not found. Install glyphs-cli>=0.6.2.",
-        }
+        })
 
     output_directory = _timestamped_output(source_path, now)
     temporary_directory = output_directory / ".glyphs-cli-tmp"
@@ -240,7 +283,7 @@ def export_source(
 
     unique_warnings = list(dict.fromkeys(item for item in warnings if item))
     unique_errors = list(dict.fromkeys(item for item in errors if item))
-    return {
+    return _with_export_log({
         "ok": bool(exported_files) and not unique_errors,
         "sourcePath": str(source_path),
         "outputDirectory": str(output_directory),
@@ -249,7 +292,7 @@ def export_source(
         "warnings": unique_warnings,
         "errors": unique_errors,
         "commands": commands,
-    }
+    })
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -274,13 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
-        for result in results:
-            if result.get("ok"):
-                print(f"Exported {len(result['exportedFiles'])} file(s) to {result['outputDirectory']}")
-                for warning in result["warnings"]:
-                    print(f"warning: {warning}", file=sys.stderr)
-            else:
-                print(f"error: {result.get('error') or '; '.join(result.get('errors', []))}", file=sys.stderr)
+        print("\n\n".join(result["exportLog"] for result in results))
     return 0 if all(result.get("ok") for result in results) else 1
 
 

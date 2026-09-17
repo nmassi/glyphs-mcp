@@ -98,6 +98,20 @@ class MCPToolCatalogTests(unittest.TestCase):
             timeout=600,
         )
         self.assertTrue(result["ok"])
+        self.assertIn("exportLog", result)
+
+    @patch.object(server, "_export_source")
+    @patch.object(server, "_post", return_value={
+        "error": "The open font has unsaved changes.",
+        "code": "unsaved_changes",
+        "sourcePath": "/fonts/Family.glyphs",
+    })
+    def test_export_font_returns_display_log_for_preparation_errors(self, post, export_source):
+        result = server.export_font()
+
+        export_source.assert_not_called()
+        self.assertIn("Status: FAILED", result["exportLog"])
+        self.assertIn("unsaved changes", result["exportLog"])
 
     @patch.object(server.urllib.request, "urlopen")
     def test_post_preserves_structured_http_errors(self, urlopen):

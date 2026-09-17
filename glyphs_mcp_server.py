@@ -20,7 +20,7 @@ import urllib.error
 import base64
 from mcp.server.fastmcp import FastMCP
 from font_name_check import check_font_name as _check_font_name
-from glyphs_export import export_source as _export_source
+from glyphs_export import export_source as _export_source, format_export_log as _format_export_log
 
 mcp = FastMCP("glyphs-mcp")
 
@@ -1840,6 +1840,9 @@ def export_font(
     WOFF, and WOFF2. Variable instances are exported as variable TTF files.
     Previous export directories are never removed or overwritten.
 
+    The response always contains ``exportLog``. The calling agent MUST show
+    that log to the user after every export attempt, including failures.
+
     Args:
         save_before_export: Save pending changes before exporting. Defaults to
             False; if the document is edited, the tool asks for confirmation
@@ -1852,14 +1855,17 @@ def export_font(
         timeout=30,
     )
     if not prepared.get("ok"):
+        prepared["exportLog"] = _format_export_log(prepared)
         return prepared
 
-    return _export_source(
+    result = _export_source(
         prepared["sourcePath"],
         app=prepared.get("appPath", ""),
         plugins="",
         timeout=timeout,
     )
+    result.setdefault("exportLog", _format_export_log(result))
+    return result
 
 
 @mcp.tool()
