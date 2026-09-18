@@ -1,33 +1,38 @@
-# Recipe: Create a GlyphsApp Plugin
+# Recipe: Create a Glyphs Plugin
 
-Create a standalone GlyphsApp 3 plugin with proper bundle structure.
+Create a standalone GlyphsApp Python plugin (`.glyphsPlugin`) with a valid bundle
+and a General plugin class.
 
-**Version scope (2026-09-05):** this remains a Glyphs 3 template, not a verified
-Glyphs 4 recipe. Confirm the intended app version/build and consult the
-[Python wrapper](https://docu.glyphsapp.com/) and
-[Core API](https://docu.glyphsapp.com/Core/) before adapting it. The `GLYPHS4`
-symbol page alone does not establish compatibility. The local `docs-mcp` snapshot
-was ingested on 2026-03-05; the template was not runtime-tested in this audit.
+**Verified against:** Glyphs 4.1.1 (build 4108), using the official Glyphs SDK
+"General Plugin" Python template (`schriftgestalt/GlyphsSDK`,
+`Python Templates/General Plugin`) and the plugin wrapper shipped inside the app
+at `Glyphs 4.app/Contents/Scripts/GlyphsApp/plugins.py`. The same bundle layout
+also loads in Glyphs 3; only the Python API differs. Check
+`Glyphs.versionNumber` and `Glyphs.buildNumber` at runtime before relying on
+version-specific behavior.
 
 ## Parameters needed
-- `plugin_name`: PascalCase name (e.g., `CopycatMaster`). Used for class, bundle, and folder names.
-- `bundle_id`: reverse-DNS identifier (e.g., `com.nico.copycatmaster`)
+- `plugin_name`: PascalCase class name (e.g. `CopycatMaster`). Used for the class, the bundle folder, and `NSPrincipalClass`.
+- `bundle_id`: reverse-DNS identifier (e.g. `com.nico.copycatmaster`). Must be unique across installed plugins.
 - `description`: what the plugin does
-- `menu_location`: where to add the menu item (usually `WINDOW_MENU`)
-- `output_path`: where to create the plugin folder (e.g., `/Users/.../Apps/MyPlugin`)
+- `menu_location`: menu constant for the menu item (usually `WINDOW_MENU`)
+- `output_path`: where to create the plugin folder (e.g. `/Users/.../Apps/MyPlugin`)
+- `bundle_version`: machine-readable version, integer or float (e.g. `1.0`)
+- `copyright`: optional author line (e.g. `Copyright, Nico, 2026`)
 
 ## Steps
 
-### 1. Create bundle structure
+### 1. Create the bundle structure
 
-Every GlyphsApp plugin is a `.glyphsPlugin` bundle (a folder macOS treats as a package):
+Every GlyphsApp plugin is a `.glyphsPlugin` bundle (a folder macOS treats as a
+package):
 
 ```
 {plugin_name}.glyphsPlugin/
   Contents/
     Info.plist          ← Bundle metadata
     MacOS/
-      plugin            ← Binary stub (copy from any existing .glyphsPlugin)
+      plugin            ← Binary loader stub (copy from an existing .glyphsPlugin)
     Resources/
       plugin.py         ← Main plugin code (entry point)
 ```
@@ -37,16 +42,20 @@ Every GlyphsApp plugin is a `.glyphsPlugin` bundle (a folder macOS treats as a p
 mkdir -p {output_path}/{plugin_name}.glyphsPlugin/Contents/{MacOS,Resources}
 ```
 
-**Copy binary stub** from an existing plugin validated for the target app build.
-The following source path is a Glyphs 3 example only; verify it before copying:
+**Copy the binary loader stub.** This stub is a universal arm64 + x86_64 Mach-O
+bundle (`120256` bytes, md5 `e089046f66cec3264e14e3f7db1cbfcc`). It is identical
+across Glyphs 3 and Glyphs 4, so any existing `.glyphsPlugin` works as a source:
+
 ```
-cp ~/Library/Application\ Support/Glyphs\ 3/Plugins/GlyphsMCP.glyphsPlugin/Contents/MacOS/plugin \
+cp ~/Library/Application\ Support/Glyphs\ 4/Plugins/GlyphsMCP.glyphsPlugin/Contents/MacOS/plugin \
    {output_path}/{plugin_name}.glyphsPlugin/Contents/MacOS/plugin
 ```
 
 ### 2. Create Info.plist
 
-CRITICAL: `NSPrincipalClass` MUST match the Python class name exactly.
+CRITICAL: `NSPrincipalClass` MUST match the Python class name exactly, and
+`PyMainFileNames` MUST list `plugin.py`. Without `PyMainFileNames`, Glyphs does
+not load a Python plugin.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -54,7 +63,7 @@ CRITICAL: `NSPrincipalClass` MUST match the Python class name exactly.
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>English</string>
+    <string>en</string>
     <key>CFBundleExecutable</key>
     <string>plugin</string>
     <key>CFBundleIdentifier</key>
@@ -66,18 +75,28 @@ CRITICAL: `NSPrincipalClass` MUST match the Python class name exactly.
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>{bundle_version}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>{bundle_version}</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>{copyright}</string>
     <key>NSPrincipalClass</key>
     <string>{plugin_name}</string>
+    <key>PyMainFileNames</key>
+    <array>
+        <string>plugin.py</string>
+    </array>
 </dict>
 </plist>
 ```
 
+Optionally add `UpdateFeedURL` and `productPageURL` to participate in Glyphs'
+automatic update notifications (the online plist must contain at least
+`CFBundleVersion` and `productPageURL`).
+
 ### 3. Create plugin.py
 
-Template for a GeneralPlugin with a menu item and dialog:
+Template for a `GeneralPlugin` with a menu item and an action:
 
 ```python
 # encoding: utf-8
@@ -85,43 +104,35 @@ Template for a GeneralPlugin with a menu item and dialog:
 {plugin_name} — {description}
 """
 
-from GlyphsApp import *
-from GlyphsApp.plugins import *
-from AppKit import NSMenu, NSMenuItem, NSAlert
-from Foundation import NSPoint
+import objc
+from GlyphsApp import Glyphs, WINDOW_MENU
+from GlyphsApp.plugins import GeneralPlugin
+from AppKit import NSMenuItem
 
 
 class {plugin_name}(GeneralPlugin):
 
     @objc.python_method
     def settings(self):
-        self.name = "{plugin_name}"
+        self.name = Glyphs.localize({"en": "{plugin_name}"})
 
     @objc.python_method
     def start(self):
-        self._menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "{menu_title}", self.action_, ""
         )
-        self._menu_item.setTarget_(self)
-        Glyphs.menu[WINDOW_MENU].append(self._menu_item)
+        item.setTarget_(self)
+        Glyphs.menu[WINDOW_MENU].append(item)
 
     def action_(self, sender):
-        """Main action — triggered from menu."""
+        """Main action — triggered from the menu."""
         font = Glyphs.font
         if not font:
-            Message("No font open", "Open a font first.")
+            Glyphs.showNotification("{plugin_name}", "Open a font first.")
             return
 
         # Your logic here
         pass
-
-    @objc.python_method
-    def __del__(self):
-        if hasattr(self, '_menu_item') and self._menu_item:
-            try:
-                Glyphs.menu[WINDOW_MENU].submenu().removeItem_(self._menu_item)
-            except Exception:
-                pass
 
     @objc.python_method
     def __file__(self):
@@ -133,17 +144,44 @@ class {plugin_name}(GeneralPlugin):
 
 Follow these rules or the plugin will crash or silently fail:
 
-1. **Class name = NSPrincipalClass**: The class in plugin.py MUST match `NSPrincipalClass` in Info.plist exactly.
-2. **Imports**: MUST use BOTH `from GlyphsApp import *` AND `from GlyphsApp.plugins import *`. Menu constants like `WINDOW_MENU` only come from the first.
-3. **ObjC methods**: Methods called from ObjC (menu actions) use camelCase with trailing underscore (e.g., `action_`). Do NOT add `@objc.python_method`.
-4. **Python methods**: Internal helpers MUST have `@objc.python_method` decorator if they don't follow ObjC naming conventions.
-5. **No external packages**: Only stdlib + PyObjC + GlyphsApp. No pip packages.
-6. **Threading**: All GlyphsApp API calls (GSFont, GSGlyph, GSLayer, etc.) MUST happen on the main thread. Menu actions already run on main thread, so this is automatic for UI plugins.
-7. **Bulk changes**: Wrap multi-glyph writes in `font.disableUpdateInterface()` / `font.enableUpdateInterface()`.
-8. **Path mutation**: The current [GSLayer.paths reference](https://docu.glyphsapp.com/#GSLayer.paths) describes an iteration helper and directs additions/removals to `GSLayer.shapes`. Verify mutations on the target build; preserve components and other shapes for paths-only operations.
-9. **Node types are strings**: In Glyphs 3, `node.type` returns `"line"`, `"curve"`, `"offcurve"`, `"qcurve"` — NOT integers.
+1. **Class name = `NSPrincipalClass`**: the class in `plugin.py` MUST match `NSPrincipalClass` in `Info.plist` exactly, and `plugin.py` MUST be listed in `PyMainFileNames`.
+2. **Imports**: use explicit imports — `from GlyphsApp import Glyphs, WINDOW_MENU` plus `from GlyphsApp.plugins import GeneralPlugin`. Menu constants and callback hooks come from `GlyphsApp`; the base classes come from `GlyphsApp.plugins`. Do not rely on `from GlyphsApp import *`.
+3. **ObjC action methods**: methods called from ObjC (menu actions) use camelCase with a trailing underscore (e.g. `action_`). Do NOT add `@objc.python_method` to them.
+4. **Python methods**: internal helpers and lifecycle methods (`settings`, `start`, `__file__`) MUST have the `@objc.python_method` decorator.
+5. **No external packages**: only stdlib + PyObjC + GlyphsApp. Do not import pip packages; installable modules come from the Plugin Manager's "Modules" tab.
+6. **Threading**: all GlyphsApp API calls (GSFont, GSGlyph, GSLayer, etc.) MUST happen on the main thread. Menu actions already run on the main thread. Never touch Glyphs objects from a background thread.
+7. **Bulk changes**: wrap multi-glyph writes in `font.disableUpdateInterface()` / `font.enableUpdateInterface()`.
+8. **Path mutation**: the [GSLayer.paths reference](https://docu.glyphsapp.com/#GSLayer.paths) describes an iteration helper and directs additions/removals to `GSLayer.shapes`. Preserve components and other shapes for paths-only operations.
+9. **Node types are strings**: `node.type` returns `"line"`, `"curve"`, `"offcurve"`, or `"qcurve"` — NOT integers.
+10. **Version checks**: use `Glyphs.versionNumber` (float, major.minor) for feature gates, e.g. `if Glyphs.versionNumber < 4:`. Use `Glyphs.buildNumber` when preview builds matter. `Glyphs.versionNumber` is derived from the version string and only keeps major.minor.
+11. **`__file__` method**: keep it unchanged. It is required for `self.loadNib("name", __file__)` and for resolving resources inside the bundle.
 
-### 5. Install the plugin
+### 5. Optional — react to editor events with callbacks
+
+A `GeneralPlugin` is the right place for callbacks that must stay live. Register
+in `start()` and remove them when the plugin is torn down:
+
+```python
+@objc.python_method
+def start(self):
+    Glyphs.addCallback(self.draw_overlay_, DRAWFOREGROUND)
+
+def draw_overlay_(self, layer, info):
+    try:
+        # layer is a GSLayer; info is a dict with at least "Scale"
+        pass
+    except Exception:
+        import traceback
+        traceback.print_exc()
+```
+
+Available hooks include `DRAWFOREGROUND`, `DRAWBACKGROUND`, `DRAWINACTIVE`,
+`DOCUMENTOPENED`, `DOCUMENTACTIVATED`, `DOCUMENTWASSAVED`, `DOCUMENTEXPORTED`,
+`DOCUMENTWILLCLOSE`, `DOCUMENTDIDCLOSE`, `TABDIDOPEN`, `TABWILLCLOSE`,
+`UPDATEINTERFACE`, and the `MOUSE*` hooks. Remove a callback with
+`Glyphs.removeCallback(function)` using the same function reference.
+
+### 6. Install the plugin
 
 Following the [official installation guidance](https://handbook.glyphsapp.com/plugins/),
 drag the completed bundle onto the intended Glyphs app icon in the Dock. The
@@ -153,32 +191,35 @@ used to validate the plugin.
 
 Then restart GlyphsApp.
 
-### 6. Verify
+### 7. Verify
 
 After restart, check:
-- Menu item appears under Window menu
+- Menu item appears under the expected menu
 - Click the menu item — action runs without errors
 - Check GlyphsApp's Macro Panel (Window > Macro Panel) for any error output
+- Confirm the plugin loaded under Glyphs > Settings > Plugins
 
 ### Common AppKit UI patterns
 
 **NSAlert dialog (confirmation):**
 ```python
+from AppKit import NSAlert, NSAlertFirstButtonReturn
+
 alert = NSAlert.alloc().init()
 alert.setMessageText_("Title")
 alert.setInformativeText_("Description")
 alert.addButtonWithTitle_("OK")
 alert.addButtonWithTitle_("Cancel")
-response = alert.runModal()
-if response == 1000:  # OK clicked
+if alert.runModal() == NSAlertFirstButtonReturn:
     pass
 ```
 
 **NSPopUpButton (dropdown in dialog):**
 ```python
-from AppKit import NSPopUpButton, NSView
-accessory = NSView.alloc().initWithFrame_(((0, 0), (300, 30)))
-popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(((0, 0), (280, 26)), False)
+from AppKit import NSAlert, NSPopUpButton, NSView, NSMakeRect
+
+accessory = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 30))
+popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 280, 26), False)
 popup.addItemWithTitle_("Option A")
 popup.addItemWithTitle_("Option B")
 accessory.addSubview_(popup)
@@ -187,7 +228,14 @@ alert.setAccessoryView_(accessory)
 selected = popup.indexOfSelectedItem()
 ```
 
-**Message (simple notification):**
+**Notification (macOS Notification Center):**
 ```python
-Message("Title", "Body text")
+Glyphs.showNotification("Title", "Body text")
+```
+
+**Modal alert (blocking):**
+```python
+from GlyphsApp import Message  # or use Glyphs.showNotification for non-blocking
+
+Message(title="Title", message="Body text")
 ```

@@ -30,18 +30,13 @@ def discover_repo_path(plugin_file):
 	return None
 
 
-def glyphs_major_version(version_number):
-	"""Return the supported Glyphs major version from a Glyphs version value."""
+def server_name(version_number=None):
+	"""Return a per-app MCP server name: Glyphs 4 keeps 'glyphs-mcp', Glyphs 3 uses 'glyphs-mcp-3'."""
 	try:
 		major = int(str(version_number).split(".", 1)[0])
 	except (TypeError, ValueError):
-		return None
-	return major if major in (3, 4) else None
-
-
-def server_name(version_number):
-	major = glyphs_major_version(version_number)
-	return f"glyphs-{major}" if major else "glyphs-mcp"
+		major = None
+	return "glyphs-mcp-3" if major == 3 else "glyphs-mcp"
 
 
 def build_server_spec(version_number, port, repo_path=None, uvx_path="uvx"):

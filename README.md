@@ -38,14 +38,14 @@ Open _Window > GlyphsMCP > Connect_ and choose your client:
 - **Cursor** — safely merges the server into `~/.cursor/mcp.json` and backs up an existing file first.
 - **Other MCP Client** — copies a portable `mcpServers` JSON block to the clipboard.
 
-Glyphs 3 and Glyphs 4 are registered separately as `glyphs-3` and `glyphs-4`, using the port currently configured in each app. If a client CLI is not available to GlyphsApp, the equivalent Terminal command is copied to the clipboard instead.
+Glyphs 4 registers as `glyphs-mcp` and Glyphs 3 as `glyphs-mcp-3`, each using the port configured in that app, so both can stay registered without collision. If a client CLI is not available to GlyphsApp, the equivalent Terminal command is copied to the clipboard instead.
 
 For manual setup, use the endpoint shown when starting the GlyphsMCP server. For example:
 
 ```json
 {
   "mcpServers": {
-    "glyphs-4": {
+    "glyphs-mcp": {
       "command": "uvx",
       "args": ["glyphs-mcp"],
       "env": {
@@ -103,6 +103,7 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | `delete_kerning_pair`  | Remove a kerning pair                                                  |
 | `set_feature_code`     | Create or update an OpenType feature                                   |
 | `generate_box_drawing` | Generate U+2500–U+259F outlines across masters; can overwrite drawings |
+| `export_font`          | Export OTF, TTF, WOFF, WOFF2, and variable TTF beside the saved source |
 
 ### Analysis
 
@@ -130,7 +131,7 @@ Open a font in GlyphsApp, then ask your AI assistant:
 | `review_production`       | Run a 44-item production-readiness review                                       |
 | `check_font_name`         | Screen a proposed family name against Fontdata; not legal clearance             |
 
-Analysis tools may mark glyphs in GlyphsApp: **red** = inconsistent, **orange** = unreliable, **yellow** = warning/optical compensation, **green** = pass. `analyze_kerning`, `analyze_spacing`, `check_compatibility`, and `compare_stems` also point to matching workflow recipes for broader checks.
+Analysis tools never change glyph colors by default. Pass `mark_glyphs=True` only when you explicitly want verdict labels in GlyphsApp: **red** = inconsistent, **orange** = unreliable, **yellow** = warning/optical compensation, **green** = pass. `analyze_kerning`, `analyze_spacing`, `check_compatibility`, and `compare_stems` also point to matching workflow recipes for broader checks.
 
 ### RMX Tools
 
@@ -147,7 +148,7 @@ Requires RMX Tools for full functionality. `rmx_scale` now uses real RMX process
 
 ### Recipes
 
-Bundled markdown recipes provide ordered workflows for consistency audits, spacing, kerning, master compatibility, proportional scaling, dated-layer cleanup, and Glyphs plugin creation.
+Bundled markdown recipes provide ordered workflows for consistency audits, spacing, kerning, master compatibility, proportional scaling, dated-layer cleanup, and Glyphs plugin or script creation.
 
 | Tool              | Description                                         |
 | ----------------- | --------------------------------------------------- |
@@ -159,6 +160,22 @@ Bundled markdown recipes provide ordered workflows for consistency audits, spaci
 
 Recipe creation and deletion modify files in the installed plugin's `Resources/recipes` directory.
 
+Recipes are also exposed as MCP prompts, so clients that surface prompts as commands get a one-command entry point. The prompt name is the recipe name. With the server registered as `glyphs-mcp`, a recipe runs as `/glyphs-mcp:<recipe>` or `/mcp__glyphs-mcp__<recipe>`:
+
+| Recipe                 | Command (Claude Code)                     | What it does                                                    |
+| ---------------------- | ----------------------------------------- | -------------------------------------------------------------- |
+| `audit_consistency`    | `/glyphs-mcp:audit_consistency`             | Full font consistency audit: stems, color, proportions, spacing |
+| `spacing_workflow`     | `/glyphs-mcp:spacing_workflow`              | Systematic spacing pass following Cheng/Briem/Ruder             |
+| `kerning_from_scratch` | `/glyphs-mcp:kerning_from_scratch`          | Kerning from scratch: groups, critical pairs, verification      |
+| `scale_proportions`    | `/glyphs-mcp:scale_proportions`             | Scale glyphs with automatic stem-weight compensation            |
+| `master_compatibility` | `/glyphs-mcp:master_compatibility`          | Pre-export master compatibility and metrics check               |
+| `cleanup_dated_layers` | `/glyphs-mcp:cleanup_dated_layers`          | Safely remove timestamped backup layers                         |
+| `create_glyphs_plugin` | `/glyphs-mcp:create_glyphs_plugin`          | Create a GlyphsApp plugin bundle                                |
+| `create_glyphs_script` | `/glyphs-mcp:create_glyphs_script`          | Create a GlyphsApp Script-menu script                           |
+| `recipes`              | `/glyphs-mcp:recipes`                       | List the available recipes, or start one by name                |
+
+These forms are what Claude Code uses. On Glyphs 3 the server prefix is `glyphs-mcp-3` (for example `/glyphs-mcp-3:audit_consistency`), so both apps can be registered side by side. MCP-prompt support varies by client: if yours does not surface prompts as commands, ask for the recipe by name or use `list_recipes` / `get_recipe` / `get_recipe_step`. In opencode you can add a custom command under `.opencode/commands/` (or `~/.config/opencode/commands/`) that calls `get_recipe_step` to get a literal `/create-plugin`.
+
 ### Advanced
 
 | Tool                | Description                                                 |
@@ -169,7 +186,17 @@ Recipe creation and deletion modify files in the installed plugin's `Resources/r
 
 All tools accept an optional `master_id` parameter. When omitted, read/write tools use the first master. Analysis tools analyze all masters and return per-master results.
 
-Tools with side effects are explicit: kerning-group analysis can assign groups and color glyphs; auto-kern can write kerning; glyphset coverage can add empty blue-labelled glyphs; box drawing creates or replaces outlines; smart scale modifies outlines and can create backup layers; recipe CRUD writes or deletes markdown files. Use dry-run/preview options where available and save the font before bulk operations.
+Tools with side effects are explicit: kerning-group analysis can assign groups, while audit color labels require `mark_glyphs=True`; auto-kern can write kerning; glyphset coverage can add empty blue-labelled glyphs; box drawing creates or replaces outlines; smart scale modifies outlines and can create backup layers; recipe CRUD writes or deletes markdown files. `export_font` writes a new timestamped directory under `export/` beside the saved source and never removes previous exports. Use dry-run/preview options where available and save the font before bulk operations.
+
+## Font export
+
+Ask the agent to export the open font, or run the bundled CLI directly:
+
+```sh
+uvx --from glyphs-mcp export-glyphs /path/to/MyFont.glyphs
+```
+
+Both paths use the official `glyphs-cli`, installed automatically with the GlyphsMCP server package on macOS. Glyphs Plugin Manager installs only the app plugin; `uvx glyphs-mcp` provisions the server and export CLI on first use. Each run creates `export/YYYY-MM-DD_HH-MM-SS/` beside the source, with separate `otf`, `ttf`, `woff`, `woff2`, and `variable` directories as applicable, plus `export-report.jsonl`. The MCP tool refuses to export unsaved changes unless `save_before_export=True` is explicitly requested. Every result includes portable `exportLog` and ANSI-colored `exportLogAnsi` variants; the calling agent must show the colored variant when its client supports terminal colors and fall back to the portable log elsewhere.
 
 ## Menu
 
@@ -193,6 +220,20 @@ The plugin adds a **GlyphsMCP** submenu under _Window_ in the menu bar:
 The GlyphsApp plugin runs an HTTP server on `127.0.0.1` using the configured port (`7745` by default). All GlyphsApp API calls run on the main thread via a queue + NSTimer bridge for thread safety.
 
 The MCP server is a thin translation layer — it receives MCP tool calls via stdio and forwards them to the plugin URL supplied through `GLYPHS_URL`.
+
+## Bundled agent skill
+
+Python distributions include the complete `skills/type-designer/` skill: a concise runtime contract plus references for general type-design workflows, typeface DNA, Glyphs 4 and scripting, safe GlyphsMCP operation, the audit contract, and curve-continuity evidence. GlyphsMCP is one execution environment within the skill, not its only subject.
+
+The skill is not installed automatically or served live through SEP-2640 because the current Python MCP SDK does not expose that extension. Install the directory through your client's normal skill workflow. To keep this checkout as the single source of truth, link rather than copy it into each client's discovery directory:
+
+```sh
+ln -s "/path/to/glyphs-mcp/skills/type-designer" "$HOME/.codex/skills/type-designer"
+ln -s "/path/to/glyphs-mcp/skills/type-designer" "$HOME/.claude/skills/type-designer"
+ln -s "/path/to/glyphs-mcp/skills/type-designer" "$HOME/.config/opencode/skills/type-designer"
+```
+
+Every client then discovers the same physical skill through `SKILL.md`; no separate copies diverge.
 
 ## Roadmap
 
