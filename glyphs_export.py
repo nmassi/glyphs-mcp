@@ -23,11 +23,24 @@ EXPORT_RUNS = (
     ("truetype", "tt", ["standard"], True),
     ("static-web", "tt", ["woff", "woff2"], False),
 )
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_RESET = "\033[0m"
 
 
-def format_export_log(result: dict) -> str:
+def _ansi(text: str, color: str, enabled: bool) -> str:
+    return f"{color}{text}{ANSI_RESET}" if enabled else text
+
+
+def format_export_log(result: dict, *, color: bool = False) -> str:
     """Build the user-facing log returned by both the CLI and MCP tool."""
-    lines = ["## Glyphs export log", f"Status: {'SUCCESS' if result.get('ok') else 'FAILED'}"]
+    succeeded = bool(result.get("ok"))
+    status = "Export complete" if succeeded else "Status: FAILED"
+    lines = [
+        "## Glyphs export log",
+        _ansi(status, ANSI_GREEN if succeeded else ANSI_RED, color),
+    ]
     if result.get("sourcePath"):
         lines.append(f"Source: {result['sourcePath']}")
     if result.get("outputDirectory"):
@@ -39,15 +52,19 @@ def format_export_log(result: dict) -> str:
 
     warnings = result.get("warnings", [])
     if warnings:
-        lines.append("Warnings:")
-        lines.extend(f"- {warning}" for warning in warnings)
+        lines.append(_ansi("Warnings:", ANSI_YELLOW, color))
+        lines.extend(_ansi(f"- {warning}", ANSI_YELLOW, color) for warning in warnings)
 
     errors = list(result.get("errors", []))
     if result.get("error"):
         errors.insert(0, result["error"])
     if errors:
-        lines.append("Errors:")
-        lines.extend(f"- {error}" for error in dict.fromkeys(errors) if error)
+        lines.append(_ansi("Errors:", ANSI_RED, color))
+        lines.extend(
+            _ansi(f"- {error}", ANSI_RED, color)
+            for error in dict.fromkeys(errors)
+            if error
+        )
 
     if result.get("reportPath"):
         lines.append(f"Report: {result['reportPath']}")
@@ -56,6 +73,7 @@ def format_export_log(result: dict) -> str:
 
 def _with_export_log(result: dict) -> dict:
     result["exportLog"] = format_export_log(result)
+    result["exportLogAnsi"] = format_export_log(result, color=True)
     return result
 
 
@@ -305,6 +323,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plugins", default="", help="Plug-in selectors passed to glyphs-cli")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout per export run in seconds")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON results")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors in terminal output")
     return parser
 
 
@@ -317,7 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
-        print("\n\n".join(result["exportLog"] for result in results))
+        log_key = "exportLogAnsi" if sys.stdout.isatty() and not args.no_color else "exportLog"
+        print("\n\n".join(result[log_key] for result in results))
     return 0 if all(result.get("ok") for result in results) else 1
 
 

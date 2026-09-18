@@ -40,6 +40,7 @@ include = [
     "glyphs_mcp_server.py",
     "glyphs_export.py",
     "font_name_check.py",
+    "skills/type-designer/**",
     "plugin/GlyphsMCP.glyphsPlugin/Contents/Resources/recipes/*.md",
 ]
 exclude = [

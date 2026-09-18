@@ -23,10 +23,14 @@ from font_name_check import check_font_name as _check_font_name
 from glyphs_export import export_source as _export_source, format_export_log as _format_export_log
 
 SERVER_INSTRUCTIONS = (
-    "Inspect the open font before making state-dependent claims. "
+    "Before any multi-step or quality task (audit, spacing, kerning, scaling, "
+    "compatibility, plugin or script creation), call list_recipes first and follow "
+    "the matching recipe with get_recipe/get_recipe_step; do not improvise when a "
+    "recipe exists. Inspect the open font before making state-dependent claims. "
     "Prefer dedicated GlyphsMCP tools, and use recipes for multi-step workflows. "
     "Use execute_in_glyphs only when no dedicated tool fits. "
-    "Measure before judging quality and verify compatibility after edits."
+    "Measure before judging quality, verify compatibility after edits, and render "
+    "lists, comparisons, and status as tables when pertinent."
 )
 
 mcp = FastMCP("glyphs-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -371,6 +375,9 @@ def rmx_scale(glyph_name: str, width: int | list[int] = 100,
 
     USE THIS for percentage-based scaling requests like "make 30% wider".
 
+    RECIPE: For a multi-glyph scaling task, call get_recipe("scale_proportions")
+    first and follow it step by step.
+
     Uses RMX Scaler with stroke-weight compensation via master interpolation.
     Native affine fallback is opt-in because it cannot preserve stem weight.
     Response includes a "method" field:
@@ -492,6 +499,8 @@ def rmx_batch(filter_name: str, glyph_names: list[str],
               params: dict = {}, master_id: str = "") -> dict:
     """Apply an RMX filter to multiple glyphs at once.
 
+    RECIPE: For multi-glyph scaling, call get_recipe("scale_proportions") first.
+
     Args:
         filter_name: One of "harmonize", "tune", "scale", "monospace"
         glyph_names: List of glyph names to process
@@ -524,6 +533,11 @@ def execute_in_glyphs(code: str) -> dict:
 
     NOTE: This endpoint is disabled by default. The user must enable it
     in GlyphsApp preferences (com.nico.glyphs-mcp.allowExecute = True).
+
+    RECIPE: Do not improvise multi-step work here. To create a Glyphs plugin or
+    script, follow get_recipe("create_glyphs_plugin") or
+    get_recipe("create_glyphs_script"). For bulk layer cleanup, follow
+    get_recipe("cleanup_dated_layers").
 
     Example: execute_in_glyphs("print(Glyphs.font.familyName)")
     """
@@ -890,7 +904,9 @@ def measure_stems(glyph_name: str, master_id: str = "",
 
 
 @mcp.tool()
-def compare_stems(glyph_names: list[str], master_id: str = "") -> str:
+def compare_stems(
+    glyph_names: list[str], master_id: str = "", mark_glyphs: bool = False,
+) -> str:
     """Compare stem thicknesses across multiple glyphs to find inconsistencies.
 
     RECIPE: For a full font audit (stems + color + proportions + spacing),
@@ -917,14 +933,15 @@ def compare_stems(glyph_names: list[str], master_id: str = "") -> str:
     results. Glyph color = worst verdict across all masters.
     If master_id is provided, analyzes that single master only.
 
-    Marks results directly in GlyphsApp with colors:
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks:
       Red=inconsistent, Orange=unreliable, Yellow=compensation, Green=pass
 
     Args:
         glyph_names: List of glyphs to compare
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {"glyphNames": glyph_names}
+    body = {"glyphNames": glyph_names, "markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     return _format_compare_stems(_post("/api/font/stems/compare", body))
@@ -969,8 +986,12 @@ def measure_color(glyph_name: str, master_id: str = "") -> dict:
 
 
 @mcp.tool()
-def compare_color(glyph_names: list[str], master_id: str = "") -> str:
+def compare_color(
+    glyph_names: list[str], master_id: str = "", mark_glyphs: bool = False,
+) -> str:
     """Compare typographic color (ink density) across multiple glyphs.
+
+    RECIPE: For a full consistency audit, follow get_recipe("audit_consistency").
 
     Finds glyphs that are visually too dark or too light compared to the group.
     Uses per-glyph expected density ratios from industry patterns — each glyph
@@ -981,7 +1002,7 @@ def compare_color(glyph_names: list[str], master_id: str = "") -> str:
     If master_id is omitted, analyzes ALL masters and returns per-master
     results. Glyph color in GlyphsApp = worst verdict across all masters.
 
-    Auto-marks glyphs in GlyphsApp:
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks:
     - Red (0) = inconsistent density
     - Orange (1) = unreliable measurement
     - Yellow (3) = optical compensation (expected)
@@ -990,20 +1011,23 @@ def compare_color(glyph_names: list[str], master_id: str = "") -> str:
     Args:
         glyph_names: Glyphs to compare
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
 
     Examples:
         "Is the color consistent across uppercase?" ->
         compare_color(["H","I","M","N","O","B","D","E","F","K","L","P","R"])
     """
-    body = {"glyphNames": glyph_names}
+    body = {"glyphNames": glyph_names, "markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     return _format_compare_color(_post("/api/font/color/compare", body))
 
 
 @mcp.tool()
-def audit_font_color(master_id: str = "") -> str:
+def audit_font_color(master_id: str = "", mark_glyphs: bool = False) -> str:
     """Full font color audit — analyzes ALL letter glyphs grouped by category.
+
+    RECIPE: For a full consistency audit, follow get_recipe("audit_consistency").
 
     Groups glyphs into uppercase, lowercase, and figures, then evaluates
     each against expected density ratios from industry patterns.
@@ -1011,22 +1035,33 @@ def audit_font_color(master_id: str = "") -> str:
     If master_id is omitted, analyzes ALL masters with worst-verdict-wins
     for glyph colors in GlyphsApp.
 
-    Auto-marks glyphs: red=inconsistent, orange=unreliable, yellow=compensation, green=pass.
+    Does not modify glyph colors by default. Set ``mark_glyphs=True`` only when
+    the user explicitly asks to mark results in GlyphsApp.
 
     The lowercase-to-uppercase density ratio is typically 1.10-1.16 in professional fonts.
 
     This is the comprehensive "is my font's color even?" check.
     Use this before final production to catch any weight inconsistencies.
+
+    Args:
+        master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     return _format_audit_color(_post("/api/font/color/audit", body))
 
 
 @mcp.tool()
-def check_overshoots(glyph_names: list[str] = None, master_id: str = "") -> str:
+def check_overshoots(
+    glyph_names: list[str] | None = None,
+    master_id: str = "",
+    mark_glyphs: bool = False,
+) -> str:
     """Check overshoot values for round and pointed forms.
+
+    RECIPE: For a pre-export check, follow get_recipe("master_compatibility").
 
     Round forms (O, o, C, S, etc.) should overshoot baseline and zone top
     by ~1-2% of zone height. Pointed forms (A, V, W) need MORE overshoot
@@ -1037,13 +1072,15 @@ def check_overshoots(glyph_names: list[str] = None, master_id: str = "") -> str:
 
     If master_id is omitted, analyzes ALL masters.
 
-    Auto-marks glyphs: red=missing/excessive overshoot, green=pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    missing/excessive overshoots red and passing glyphs green.
 
     Args:
         glyph_names: Optional list of glyphs to check (default: all overshoot glyphs)
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if glyph_names:
         body["glyphNames"] = glyph_names
     if master_id:
@@ -1052,8 +1089,14 @@ def check_overshoots(glyph_names: list[str] = None, master_id: str = "") -> str:
 
 
 @mcp.tool()
-def compare_proportions(glyph_names: list[str] = None, master_id: str = "") -> str:
+def compare_proportions(
+    glyph_names: list[str] | None = None,
+    master_id: str = "",
+    mark_glyphs: bool = False,
+) -> str:
     """Compare width proportions across glyphs within a font.
+
+    RECIPE: For a full consistency audit, follow get_recipe("audit_consistency").
 
     Checks three things:
     1. Related-form groups: b≈d≈p≈q (mirrored), h≈n≈u (arch), O≈Q, etc.
@@ -1065,14 +1108,15 @@ def compare_proportions(glyph_names: list[str] = None, master_id: str = "") -> s
     If no glyph_names provided, checks all LC + UC + figures.
     If master_id is omitted, analyzes ALL masters.
 
-    Auto-marks glyphs: red=group inconsistency or ordering violation,
-    yellow=outside industry range, green=pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    inconsistencies red, range warnings yellow, and passing glyphs green.
 
     Args:
         glyph_names: Optional list of glyphs to check
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if glyph_names:
         body["glyphNames"] = glyph_names
     if master_id:
@@ -1081,7 +1125,11 @@ def compare_proportions(glyph_names: list[str] = None, master_id: str = "") -> s
 
 
 @mcp.tool()
-def check_diagonal_weights(glyph_names: list[str] = None, master_id: str = "") -> str:
+def check_diagonal_weights(
+    glyph_names: list[str] | None = None,
+    master_id: str = "",
+    mark_glyphs: bool = False,
+) -> str:
     """Check diagonal stroke weight consistency and ratio to vertical stems.
 
     Measures perpendicular thickness of diagonal strokes (V, A, W, X, Y, Z,
@@ -1092,13 +1140,15 @@ def check_diagonal_weights(glyph_names: list[str] = None, master_id: str = "") -
     If no glyph_names provided, checks all diagonal glyphs.
     If master_id is omitted, analyzes ALL masters.
 
-    Auto-marks glyphs: red=group inconsistency, yellow=ratio outside range, green=pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    inconsistencies red, ratio warnings yellow, and passing glyphs green.
 
     Args:
         glyph_names: Optional list of glyphs to check
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if glyph_names:
         body["glyphNames"] = glyph_names
     if master_id:
@@ -1107,7 +1157,11 @@ def check_diagonal_weights(glyph_names: list[str] = None, master_id: str = "") -
 
 
 @mcp.tool()
-def check_junctions(glyph_names: list[str] = None, master_id: str = "") -> str:
+def check_junctions(
+    glyph_names: list[str] | None = None,
+    master_id: str = "",
+    mark_glyphs: bool = False,
+) -> str:
     """Check junction thinning consistency across related glyphs.
 
     Measures how stems thin at arch/bowl junctions (n, m, b, d, p, q, etc.)
@@ -1120,13 +1174,15 @@ def check_junctions(glyph_names: list[str] = None, master_id: str = "") -> str:
 
     If master_id is omitted, analyzes ALL masters.
 
-    Auto-marks glyphs: red=group inconsistency, green=pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    inconsistencies red and passing glyphs green.
 
     Args:
         glyph_names: Optional list of glyphs to check (default: n,h,m,u,a,b,d,p,q)
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if glyph_names:
         body["glyphNames"] = glyph_names
     if master_id:
@@ -1135,7 +1191,7 @@ def check_junctions(glyph_names: list[str] = None, master_id: str = "") -> str:
 
 
 @mcp.tool()
-def check_related_forms(master_id: str = "") -> str:
+def check_related_forms(master_id: str = "", mark_glyphs: bool = False) -> str:
     """Cross-validate related figures and letters (0↔O, 6↔9, 8↔S, 3↔B, etc.).
 
     Based on industry patterns across professional fonts.
@@ -1150,19 +1206,21 @@ def check_related_forms(master_id: str = "") -> str:
 
     If master_id is omitted, analyzes ALL masters.
 
-    Auto-marks glyphs: red=high-severity failure, yellow=medium warning, green=pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    severe failures red, warnings yellow, and passing glyphs green.
 
     Args:
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     return _format_related_forms(_post("/api/font/related-forms/check", body))
 
 
 @mcp.tool()
-def check_punctuation(master_id: str = "") -> str:
+def check_punctuation(master_id: str = "", mark_glyphs: bool = False) -> str:
     """Check punctuation consistency: mirrored pairs, width matches, and ratio checks.
 
     Based on industry patterns across professional fonts. Checks:
@@ -1180,12 +1238,14 @@ def check_punctuation(master_id: str = "") -> str:
 
     Skips any pairs where glyphs are missing. If master_id is omitted, analyzes ALL masters.
 
-    Auto-marks glyphs: red=mirrored pair mismatch, yellow=width warning, green=pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    mismatches red, width warnings yellow, and passing glyphs green.
 
     Args:
         master_id: Optional master ID (empty = all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     return _format_punctuation(_post("/api/font/punctuation/check", body))
@@ -1280,7 +1340,9 @@ def _format_compatibility_report(data: dict) -> str:
 
 
 @mcp.tool()
-def check_compatibility(glyph_names: list[str] = None) -> str:
+def check_compatibility(
+    glyph_names: list[str] | None = None, mark_glyphs: bool = False,
+) -> str:
     """Check master compatibility across all glyphs in the font.
 
     RECIPE: For a complete pre-export check, call get_recipe("master_compatibility")
@@ -1293,15 +1355,16 @@ def check_compatibility(glyph_names: list[str] = None) -> str:
     - Component count and names
     - Anchor names
 
-    Auto-marks glyphs in GlyphsApp:
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks:
     - Red (0) = incompatible (structural mismatch between masters)
     - Orange (1) = empty or missing drawing in one or more masters
     - Green (4) = fully compatible
 
     Args:
         glyph_names: Optional list of glyphs to check (default: all glyphs)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if glyph_names:
         body["glyphNames"] = glyph_names
     data = _post("/api/font/compatibility/check", body)
@@ -1471,7 +1534,7 @@ def _format_kerning_report(data: dict) -> str:
 
 
 @mcp.tool()
-def analyze_kerning(master_id: str = "") -> str:
+def analyze_kerning(master_id: str = "", mark_glyphs: bool = False) -> str:
     """Analyze kerning quality across all masters.
 
     RECIPE: For kerning from scratch, call get_recipe("kerning_from_scratch")
@@ -1484,13 +1547,14 @@ def analyze_kerning(master_id: str = "") -> str:
     - Redundant exceptions (glyph-level overrides that match group value — can be removed)
     - Group orphans (Letter glyphs missing kerning group assignments)
 
-    Returns a formatted markdown report. Marks affected glyphs in GlyphsApp:
-    red = cross-master issues, yellow = quality warnings.
+    Returns a formatted markdown report without modifying glyph colors. When
+    ``mark_glyphs=True``, marks cross-master issues red and warnings yellow.
 
     Args:
         master_id: Optional master ID (cross-master checks always run across all masters)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     data = _post("/api/font/kerning/analyze", body)
@@ -1669,7 +1733,11 @@ def _format_spacing_report(data: dict) -> str:
 
 
 @mcp.tool()
-def analyze_spacing(master_id: str = "", glyph_names: list[str] = None) -> str:
+def analyze_spacing(
+    master_id: str = "",
+    glyph_names: list[str] | None = None,
+    mark_glyphs: bool = False,
+) -> str:
     """Analyze spacing quality across all masters.
 
     RECIPE: For systematic spacing work, call get_recipe("spacing_workflow")
@@ -1686,14 +1754,15 @@ def analyze_spacing(master_id: str = "", glyph_names: list[str] = None) -> str:
     - Word space check (space width ≈ ¼ em ≈ width of i)
     - Cross-master spacing drift (spacing ratios should be maintained)
 
-    Marks glyphs in GlyphsApp: red = significant inconsistency,
-    yellow = minor deviation, green = pass.
+    Does not modify glyph colors by default. When ``mark_glyphs=True``, marks
+    significant inconsistencies red, minor deviations yellow, and passes green.
 
     Args:
         master_id: Optional master ID (empty = all masters)
         glyph_names: Optional list of glyphs (empty = all Letter glyphs)
+        mark_glyphs: Color glyphs by verdict only when explicitly requested
     """
-    body = {}
+    body = {"markGlyphs": mark_glyphs}
     if master_id:
         body["masterId"] = master_id
     if glyph_names:
@@ -1706,6 +1775,8 @@ def analyze_spacing(master_id: str = "", glyph_names: list[str] = None) -> str:
 @mcp.tool()
 def get_spacing_strings(glyph_name: str) -> str:
     """Get spacing test strings for visually evaluating a glyph's spacing.
+
+    RECIPE: For systematic spacing work, follow get_recipe("spacing_workflow").
 
     Generates canonical test strings based on industry-standard methods:
     - Three-at-a-time (OH no Type Co): glyph sandwiched between n/o or H/O
@@ -1847,8 +1918,10 @@ def export_font(
     WOFF, and WOFF2. Variable instances are exported as variable TTF files.
     Previous export directories are never removed or overwritten.
 
-    The response always contains ``exportLog``. The calling agent MUST show
-    that log to the user after every export attempt, including failures.
+    The response always contains portable ``exportLog`` and colored
+    ``exportLogAnsi`` variants. The calling agent MUST show the ANSI variant
+    when its client supports terminal colors, otherwise the portable log,
+    after every export attempt including failures.
 
     Args:
         save_before_export: Save pending changes before exporting. Defaults to
@@ -1863,6 +1936,7 @@ def export_font(
     )
     if not prepared.get("ok"):
         prepared["exportLog"] = _format_export_log(prepared)
+        prepared["exportLogAnsi"] = _format_export_log(prepared, color=True)
         return prepared
 
     result = _export_source(
@@ -1872,6 +1946,7 @@ def export_font(
         timeout=timeout,
     )
     result.setdefault("exportLog", _format_export_log(result))
+    result.setdefault("exportLogAnsi", _format_export_log(result, color=True))
     return result
 
 
@@ -1880,6 +1955,7 @@ def analyze_kerning_groups(
     glyph_names: list[str] | None = None,
     apply: bool = True,
     overwrite: bool = True,
+    mark_glyphs: bool = False,
 ) -> str:
     """Analyze and assign kerning groups to all glyphs.
 
@@ -1901,14 +1977,16 @@ def analyze_kerning_groups(
     - LC right: h (straight), n (arch), o (round), etc.
     - Figures: each gets its own group (shapes too varied)
 
-    Marks glyphs green in GlyphsApp after applying.
+    Does not modify glyph colors by default. Set ``mark_glyphs=True`` only when
+    the user explicitly asks to mark applied or proposed group changes.
 
     Args:
         glyph_names: Optional list of glyph names (default: all Letter/Number/Punctuation glyphs)
         apply: If True (default), assign groups. If False, dry run only.
         overwrite: If True (default), overwrite existing groups. If False, only assign to empty slots.
+        mark_glyphs: Color affected glyphs only when explicitly requested.
     """
-    body = {"apply": apply, "overwrite": overwrite}
+    body = {"apply": apply, "overwrite": overwrite, "markGlyphs": mark_glyphs}
     if glyph_names:
         body["glyphNames"] = glyph_names
     data = _post("/api/font/kerning/groups/analyze", body)
@@ -2166,6 +2244,86 @@ def delete_recipe(name: str) -> str:
     """
     result = _delete(f"/api/recipes/{name}")
     return json.dumps(result, indent=2)
+
+
+# ── MCP prompts: one-command entry points into bundled recipes ────────────────
+
+_BUNDLED_RECIPE_PROMPTS = {
+    "audit_consistency": "Full font consistency audit: stems, color, proportions, spacing.",
+    "spacing_workflow": "Systematic spacing pass following Cheng/Briem/Ruder.",
+    "kerning_from_scratch": "Kerning from scratch: groups, critical pairs, verification.",
+    "scale_proportions": "Scale glyphs with automatic stem-weight compensation.",
+    "master_compatibility": "Pre-export master compatibility and metrics check.",
+    "cleanup_dated_layers": "Safely remove timestamped backup layers.",
+    "create_glyphs_plugin": "Create a GlyphsApp plugin bundle.",
+    "create_glyphs_script": "Create a GlyphsApp Script-menu script.",
+}
+
+
+def _available_recipe_names() -> list[str]:
+    """Return the recipe names the running plugin exposes, or [] if unavailable."""
+    data = _get("/api/recipes")
+    if not isinstance(data, dict):
+        return []
+    recipes = data.get("recipes")
+    if not isinstance(recipes, list):
+        return []
+    return [r["name"] for r in recipes if isinstance(r, dict) and r.get("name")]
+
+
+def _recipe_prompt_text(name: str) -> str:
+    """Directive telling the model to run one recipe step by step."""
+    available = _available_recipe_names()
+    if available and name not in available:
+        return (
+            f"Recipe '{name}' is not currently available. Call list_recipes() and "
+            f"choose a matching recipe. Available: {', '.join(available)}."
+        )
+    return (
+        f"Run the GlyphsMCP workflow recipe '{name}'. Call get_recipe_step('{name}', 1), "
+        f"execute EVERY tool listed in each step, and report results to the designer. "
+        f"Advance only as each step's directive requires; do not improvise and do not "
+        f"skip steps."
+    )
+
+
+@mcp.prompt(
+    name="recipes",
+    title="Run a GlyphsMCP recipe",
+    description="List available workflow recipes, or start one by name.",
+)
+def recipe_prompt(name: str = "") -> str:
+    """List recipes or start one. Pass a recipe name to begin it."""
+    if name:
+        return _recipe_prompt_text(name)
+    available = _available_recipe_names()
+    if not available:
+        return (
+            "Call list_recipes() to see the available recipes, then follow the "
+            "matching one step by step with get_recipe_step()."
+        )
+    return (
+        "Available GlyphsMCP recipes: "
+        + ", ".join(available)
+        + ". Pick the one matching the task and follow it step by step, starting "
+        "with get_recipe_step(name, 1)."
+    )
+
+
+def _register_recipe_prompt(name: str, description: str) -> None:
+    @mcp.prompt(
+        name=name,
+        title=f"Recipe: {name}",
+        description=description,
+    )
+    def _recipe_prompt() -> str:
+        return _recipe_prompt_text(name)
+
+    _recipe_prompt.__name__ = f"recipe_{name}"
+
+
+for _recipe_name, _recipe_description in _BUNDLED_RECIPE_PROMPTS.items():
+    _register_recipe_prompt(_recipe_name, _recipe_description)
 
 
 def _format_auto_kern_report(data: dict) -> str:

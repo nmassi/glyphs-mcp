@@ -9,10 +9,12 @@ class ServerInstructionsTests(unittest.TestCase):
 
         self.assertIsInstance(instructions, str)
         self.assertEqual(instructions, server.SERVER_INSTRUCTIONS)
+        self.assertIn("call list_recipes first", instructions)
         self.assertIn("Inspect the open font", instructions)
         self.assertIn("Prefer dedicated GlyphsMCP tools", instructions)
         self.assertIn("verify compatibility after edits", instructions)
-        self.assertLessEqual(len(instructions), 512)
+        self.assertIn("tables when pertinent", instructions)
+        self.assertLessEqual(len(instructions), 640)
 
 
 if __name__ == "__main__":

@@ -99,6 +99,7 @@ class MCPToolCatalogTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertIn("exportLog", result)
+        self.assertIn("exportLogAnsi", result)
 
     @patch.object(server, "_export_source")
     @patch.object(server, "_post", return_value={
@@ -112,6 +113,37 @@ class MCPToolCatalogTests(unittest.TestCase):
         export_source.assert_not_called()
         self.assertIn("Status: FAILED", result["exportLog"])
         self.assertIn("unsaved changes", result["exportLog"])
+        self.assertIn("\033[31m", result["exportLogAnsi"])
+
+    @patch.object(server, "_post", return_value={"error": "stop"})
+    def test_audit_tools_do_not_mark_glyphs_by_default(self, post):
+        calls = [
+            lambda: server.compare_stems(["n"]),
+            lambda: server.compare_color(["n"]),
+            server.audit_font_color,
+            server.check_overshoots,
+            server.compare_proportions,
+            server.check_diagonal_weights,
+            server.check_junctions,
+            server.check_related_forms,
+            server.check_punctuation,
+            server.check_compatibility,
+            server.analyze_kerning,
+            server.analyze_spacing,
+            server.analyze_kerning_groups,
+        ]
+
+        for call in calls:
+            with self.subTest(tool=call):
+                post.reset_mock()
+                call()
+                self.assertFalse(post.call_args.args[1]["markGlyphs"])
+
+    @patch.object(server, "_post", return_value={"error": "stop"})
+    def test_audit_tools_forward_explicit_glyph_marking(self, post):
+        server.audit_font_color(mark_glyphs=True)
+
+        self.assertTrue(post.call_args.args[1]["markGlyphs"])
 
     @patch.object(server.urllib.request, "urlopen")
     def test_post_preserves_structured_http_errors(self, urlopen):
@@ -146,6 +178,55 @@ class PluginRouteTests(unittest.TestCase):
             ("POST", "/api/filters/rmx/tune"),
         }
         self.assertTrue(expected <= set(self.handlers.ROUTES))
+
+    def test_audit_color_helper_requires_explicit_opt_in(self):
+        class Glyph:
+            color = 7
+            undo_count = 0
+
+            def beginUndo(self):
+                self.undo_count += 1
+
+            def endUndo(self):
+                self.undo_count += 1
+
+        glyph = Glyph()
+
+        self.handlers._mark_glyph_for_audit(glyph, 0, False)
+        self.assertEqual((glyph.color, glyph.undo_count), (7, 0))
+
+        self.handlers._mark_glyph_for_audit(glyph, 0, True)
+        self.assertEqual((glyph.color, glyph.undo_count), (0, 2))
+
+    def test_every_color_marking_audit_reads_opt_in_flag(self):
+        source = HANDLERS_PATH.read_text()
+        tree = ast.parse(source)
+        handler_names = {
+            "handle_compare_stems",
+            "handle_compare_color",
+            "handle_color_audit",
+            "handle_check_overshoots",
+            "handle_compare_proportions",
+            "handle_check_diagonals",
+            "handle_check_junctions",
+            "handle_check_related_forms",
+            "handle_check_punctuation",
+            "handle_check_compatibility",
+            "handle_analyze_kerning",
+            "handle_analyze_spacing",
+            "handle_analyze_kerning_groups",
+        }
+        handlers = {
+            node.name: ast.get_source_segment(source, node)
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in handler_names
+        }
+
+        self.assertEqual(set(handlers), handler_names)
+        for name, handler_source in handlers.items():
+            with self.subTest(handler=name):
+                self.assertIn('get("markGlyphs", False)', handler_source)
+                self.assertIn("_mark_glyph_for_audit", handler_source)
 
     def test_box_drawing_helper_generates_light_horizontal(self):
         paths, error = self.handlers._bd_generate_paths_for_codepoint(

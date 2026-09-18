@@ -90,8 +90,10 @@ class GlyphsExportTests(unittest.TestCase):
             self.assertEqual(Path(first["outputDirectory"]).name, "2026-09-17_12-34-56")
             self.assertEqual(Path(second["outputDirectory"]).name, "2026-09-17_12-34-56_2")
             self.assertEqual(first["warnings"], ["Variable warning"])
-            self.assertIn("Status: SUCCESS", first["exportLog"])
+            self.assertIn("Export complete", first["exportLog"])
+            self.assertIn(f"Output: {first['outputDirectory']}", first["exportLog"])
             self.assertIn("Exported files: 5", first["exportLog"])
+            self.assertIn(glyphs_export.ANSI_GREEN, first["exportLogAnsi"])
             self.assertTrue(Path(first["reportPath"]).is_file())
             self.assertFalse((Path(first["outputDirectory"]) / ".glyphs-cli-tmp").exists())
             self.assertTrue(all("--plugins" in command for command in first["commands"]))
@@ -126,6 +128,7 @@ class GlyphsExportTests(unittest.TestCase):
         self.assertIn("Source not found", missing["error"])
         self.assertIn("Status: FAILED", missing["exportLog"])
         self.assertIn("Source not found", missing["exportLog"])
+        self.assertIn(glyphs_export.ANSI_RED, missing["exportLogAnsi"])
         self.assertFalse(invalid["ok"])
         self.assertIn("Source must be", invalid["error"])
 
@@ -138,6 +141,17 @@ class GlyphsExportTests(unittest.TestCase):
 
             with patch.object(glyphs_export.sys, "executable", str(python)):
                 self.assertEqual(glyphs_export.find_glyphs_cli(), str(glyphs))
+
+    def test_ansi_log_colors_complete_error_block_red(self):
+        result = {"ok": False, "errors": ["Black: Stems can't be zero."]}
+
+        log = glyphs_export.format_export_log(result, color=True)
+
+        self.assertIn(f"{glyphs_export.ANSI_RED}Errors:{glyphs_export.ANSI_RESET}", log)
+        self.assertIn(
+            f"{glyphs_export.ANSI_RED}- Black: Stems can't be zero.{glyphs_export.ANSI_RESET}",
+            log,
+        )
 
 
 if __name__ == "__main__":

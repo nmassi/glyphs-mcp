@@ -46,6 +46,15 @@ def _require_font():
 	return Glyphs.font
 
 
+def _mark_glyph_for_audit(glyph, color, enabled):
+	"""Apply an audit color only when the caller explicitly opted in."""
+	if not enabled or glyph is None:
+		return
+	glyph.beginUndo()
+	glyph.color = color
+	glyph.endUndo()
+
+
 def _node_type_to_str(node_type):
 	"""Convert GSNode type to string. Handles Glyphs 3 (string) and Glyphs 2 (int)."""
 	s = str(node_type).lower()
@@ -1739,10 +1748,9 @@ def handle_compare_stems(bridge, body=None, **kwargs):
 	- unreliable: glyph shape can't be reliably measured by ray-casting
 
 	If masterId is provided, analyzes that master only.
-	If omitted, analyzes ALL masters and marks each glyph with the
-	worst verdict across masters (red if any master has issues).
+	If omitted, analyzes ALL masters and computes each glyph's worst verdict.
 
-	Auto-marks glyphs in GlyphsApp:
+	When markGlyphs is true, marks glyphs in GlyphsApp:
 	  Red (0) = inconsistent, Orange (1) = unreliable,
 	  Yellow (3) = compensation, Light green (4) = passed.
 	"""
@@ -1751,6 +1759,7 @@ def handle_compare_stems(bridge, body=None, **kwargs):
 
 	glyph_names = body["glyphNames"]
 	master_id = body.get("masterId", None)
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _compare():
 		font = _require_font()
@@ -1791,13 +1800,10 @@ def handle_compare_stems(bridge, body=None, **kwargs):
 							worst = ev["color"]
 			worst_color[gname] = worst
 
-		# Apply colors to glyphs (with undo support)
+		# Apply colors only when explicitly requested.
 		for gname in glyph_names:
 			glyph = font.glyphs[gname]
-			if glyph is not None:
-				glyph.beginUndo()
-				glyph.color = worst_color.get(gname, 4)
-				glyph.endUndo()
+			_mark_glyph_for_audit(glyph, worst_color.get(gname, 4), mark_glyphs)
 
 		result = {
 			"masters": per_master,
@@ -2022,6 +2028,7 @@ def handle_compare_color(bridge, body=None, **kwargs):
 	glyph_names = body["glyphNames"]
 	master_id = body.get("masterId", None)
 	resolution = body.get("resolution", 10)
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _compare_color():
 		from Foundation import NSPoint
@@ -2127,10 +2134,7 @@ def handle_compare_color(bridge, body=None, **kwargs):
 		# Mark glyphs in GlyphsApp with worst color across masters
 		for gname, color in worst_per_glyph.items():
 			glyph = font.glyphs[gname]
-			if glyph:
-				glyph.beginUndo()
-				glyph.color = color
-				glyph.endUndo()
+			_mark_glyph_for_audit(glyph, color, mark_glyphs)
 
 		# Build response
 		response = {
@@ -2166,6 +2170,7 @@ def handle_color_audit(bridge, body=None, **kwargs):
 	"""
 	master_id = (body or {}).get("masterId", None)
 	resolution = (body or {}).get("resolution", 15)
+	mark_glyphs = bool((body or {}).get("markGlyphs", False))
 
 	def _audit():
 		from Foundation import NSPoint
@@ -2311,10 +2316,7 @@ def handle_color_audit(bridge, body=None, **kwargs):
 		# Mark glyphs in GlyphsApp with worst color across masters
 		for gname, color in worst_per_glyph.items():
 			glyph = font.glyphs[gname]
-			if glyph:
-				glyph.beginUndo()
-				glyph.color = color
-				glyph.endUndo()
+			_mark_glyph_for_audit(glyph, color, mark_glyphs)
 
 		return {
 			"masters": all_master_results,
@@ -2419,6 +2421,7 @@ def handle_check_overshoots(bridge, body=None, **kwargs):
 	"""
 	glyph_names = (body or {}).get("glyphNames", None)
 	master_id = (body or {}).get("masterId", None)
+	mark_glyphs = bool((body or {}).get("markGlyphs", False))
 
 	def _check():
 		font = _require_font()
@@ -2637,10 +2640,7 @@ def handle_check_overshoots(bridge, body=None, **kwargs):
 
 		for gname, color in worst_color.items():
 			glyph = font.glyphs[gname]
-			if glyph:
-				glyph.beginUndo()
-				glyph.color = color
-				glyph.endUndo()
+			_mark_glyph_for_audit(glyph, color, mark_glyphs)
 
 		return {
 			"masters": all_master_results,
@@ -2976,7 +2976,7 @@ def handle_compare_proportions(bridge, body=None, **kwargs):
 	3. Industry ranges from professional fonts
 
 	Returns per-glyph proportions, group verdicts, ordering violations.
-	Auto-marks glyphs in GlyphsApp: red=inconsistent, yellow=outside range, green=pass.
+	When markGlyphs is true: red=inconsistent, yellow=outside range, green=pass.
 	"""
 	from GlyphsApp import Glyphs
 
@@ -2985,6 +2985,7 @@ def handle_compare_proportions(bridge, body=None, **kwargs):
 
 	glyph_names = body.get("glyphNames", None)
 	master_id = body.get("masterId", "")
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _run():
 		font = Glyphs.font
@@ -3169,10 +3170,8 @@ def handle_compare_proportions(bridge, body=None, **kwargs):
 		# Apply colors in GlyphsApp (with undo support)
 		for gname in check_names:
 			glyph = font.glyphs[gname]
-			if glyph and gname in worst_colors:
-				glyph.beginUndo()
-				glyph.color = worst_colors[gname]
-				glyph.endUndo()
+			if gname in worst_colors:
+				_mark_glyph_for_audit(glyph, worst_colors[gname], mark_glyphs)
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3232,7 +3231,7 @@ def handle_check_diagonals(bridge, body=None, **kwargs):
 	2. Reports diagonal/straight ratio for each glyph
 	3. Flags ratios outside professional font range
 
-	Auto-marks glyphs: red=group inconsistency, yellow=ratio outside range, green=pass.
+	When markGlyphs is true: red=group inconsistency, yellow=ratio outside range, green=pass.
 	"""
 	from GlyphsApp import Glyphs
 
@@ -3241,6 +3240,7 @@ def handle_check_diagonals(bridge, body=None, **kwargs):
 
 	glyph_names = body.get("glyphNames", None)
 	master_id = body.get("masterId", "")
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _run():
 		font = Glyphs.font
@@ -3408,10 +3408,8 @@ def handle_check_diagonals(bridge, body=None, **kwargs):
 		# Apply colors (with undo support)
 		for gname in check_names:
 			glyph = font.glyphs[gname]
-			if glyph and gname in worst_colors:
-				glyph.beginUndo()
-				glyph.color = worst_colors[gname]
-				glyph.endUndo()
+			if gname in worst_colors:
+				_mark_glyph_for_audit(glyph, worst_colors[gname], mark_glyphs)
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3528,7 +3526,7 @@ def handle_check_junctions(bridge, body=None, **kwargs):
 	Does NOT flag based on absolute thinning values — these are highly
 	design-specific. Only flags inconsistencies within related forms.
 
-	Auto-marks glyphs: red=group inconsistency, green=pass.
+	When markGlyphs is true: red=group inconsistency, green=pass.
 	"""
 	from GlyphsApp import Glyphs
 
@@ -3537,6 +3535,7 @@ def handle_check_junctions(bridge, body=None, **kwargs):
 
 	glyph_names = body.get("glyphNames", None)
 	master_id = body.get("masterId", "")
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _run():
 		font = Glyphs.font
@@ -3625,10 +3624,8 @@ def handle_check_junctions(bridge, body=None, **kwargs):
 		# Apply colors (with undo support)
 		for gname in check_names:
 			glyph = font.glyphs[gname]
-			if glyph and gname in worst_colors:
-				glyph.beginUndo()
-				glyph.color = worst_colors[gname]
-				glyph.endUndo()
+			if gname in worst_colors:
+				_mark_glyph_for_audit(glyph, worst_colors[gname], mark_glyphs)
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3674,6 +3671,7 @@ def handle_check_related_forms(bridge, body=None, **kwargs):
 	"""Check consistency between related figures and letters (0↔O, 6↔9, 8↔S, etc.)."""
 	body = body or {}
 	master_id = body.get("masterId", "")
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _run():
 		from GlyphsApp import Glyphs
@@ -3755,10 +3753,7 @@ def handle_check_related_forms(bridge, body=None, **kwargs):
 		# Mark glyphs in GlyphsApp (with undo support)
 		for gname, color in worst_colors.items():
 			glyph = font.glyphs[gname]
-			if glyph:
-				glyph.beginUndo()
-				glyph.color = color
-				glyph.endUndo()
+			_mark_glyph_for_audit(glyph, color, mark_glyphs)
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -3818,6 +3813,7 @@ def handle_check_punctuation(bridge, body=None, **kwargs):
 	"""Check punctuation consistency: mirrored pairs, width matches, and ratio checks."""
 	body = body or {}
 	master_id = body.get("masterId", "")
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _run():
 		from GlyphsApp import Glyphs
@@ -3937,10 +3933,7 @@ def handle_check_punctuation(bridge, body=None, **kwargs):
 		# Mark glyphs (with undo support)
 		for gname, color in worst_colors.items():
 			glyph = font.glyphs[gname]
-			if glyph:
-				glyph.beginUndo()
-				glyph.color = color
-				glyph.endUndo()
+			_mark_glyph_for_audit(glyph, color, mark_glyphs)
 
 		if len(masters_to_check) == 1:
 			mid = masters_to_check[0].id
@@ -4027,9 +4020,10 @@ def handle_check_compatibility(bridge, body=None, **kwargs):
 
 	Compares layers across masters for: path count, node count, node types,
 	path direction, components, and anchors. Reports incompatibilities.
-	Marks glyphs: red=incompatible, orange=empty/missing, green=compatible.
+	When markGlyphs is true: red=incompatible, orange=empty/missing, green=compatible.
 	"""
 	glyph_names = (body or {}).get("glyphNames", None)
+	mark_glyphs = bool((body or {}).get("markGlyphs", False))
 
 	def _run():
 		from GlyphsApp import Glyphs
@@ -4101,9 +4095,7 @@ def handle_check_compatibility(bridge, body=None, **kwargs):
 					"issues": issues,
 					"details": _clean_compat_details(layer_info),
 				})
-				glyph.beginUndo()
-				glyph.color = color
-				glyph.endUndo()
+				_mark_glyph_for_audit(glyph, color, mark_glyphs)
 				continue
 
 			# Check if some layers are empty while others have content
@@ -4215,9 +4207,7 @@ def handle_check_compatibility(bridge, body=None, **kwargs):
 				"details": clean_details,
 			})
 
-			glyph.beginUndo()
-			glyph.color = color
-			glyph.endUndo()
+			_mark_glyph_for_audit(glyph, color, mark_glyphs)
 
 		return {
 			"ok": True,
@@ -4304,8 +4294,10 @@ def handle_analyze_kerning(bridge, body=None, **kwargs):
 	"""Analyze kerning quality across masters.
 
 	Checks: cross-master missing pairs, sign changes, outlier values,
-	redundant exceptions, group orphans. Marks glyphs in GlyphsApp.
+	redundant exceptions, group orphans. Color marking is opt-in.
 	"""
+	mark_glyphs = bool((body or {}).get("markGlyphs", False))
+
 	def _run():
 		from GlyphsApp import Glyphs
 		font = _require_font()
@@ -4624,16 +4616,10 @@ def handle_analyze_kerning(bridge, body=None, **kwargs):
 		# Apply colors (red overrides yellow)
 		for gname in glyphs_red:
 			g = font.glyphs[gname]
-			if g:
-				g.beginUndo()
-				g.color = 0
-				g.endUndo()
+			_mark_glyph_for_audit(g, 0, mark_glyphs)
 		for gname in glyphs_yellow - glyphs_red:
 			g = font.glyphs[gname]
-			if g:
-				g.beginUndo()
-				g.color = 3
-				g.endUndo()
+			_mark_glyph_for_audit(g, 3, mark_glyphs)
 
 		return {
 			"ok": True,
@@ -4917,10 +4903,11 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 
 	Checks: sidebearing group consistency, Tracy/Smith per-glyph rules,
 	side-type ordering, symmetry, reference ratios, counter-based validation,
-	word space, and cross-master drift. Marks glyphs in GlyphsApp.
+	word space, and cross-master drift. Color marking is opt-in.
 	"""
 	master_id = (body or {}).get("masterId", "")
 	glyph_names = (body or {}).get("glyphNames", None)
+	mark_glyphs = bool((body or {}).get("markGlyphs", False))
 
 	def _run():
 		from GlyphsApp import Glyphs
@@ -5294,23 +5281,15 @@ def handle_analyze_spacing(bridge, body=None, **kwargs):
 
 		for gname in glyphs_red:
 			g = font.glyphs[gname]
-			if g:
-				g.beginUndo()
-				g.color = 0
-				g.endUndo()
+			_mark_glyph_for_audit(g, 0, mark_glyphs)
 		for gname in glyphs_yellow - glyphs_red:
 			g = font.glyphs[gname]
-			if g:
-				g.beginUndo()
-				g.color = 3
-				g.endUndo()
+			_mark_glyph_for_audit(g, 3, mark_glyphs)
 		all_flagged = glyphs_red | glyphs_yellow
 		for glyph in check_glyphs:
 			gname = str(glyph.name)
 			if gname not in all_flagged and gname in all_measurements.get(master_names[0], {}):
-				glyph.beginUndo()
-				glyph.color = 4
-				glyph.endUndo()
+				_mark_glyph_for_audit(glyph, 4, mark_glyphs)
 
 		return {
 			"ok": True,
@@ -7227,6 +7206,7 @@ def handle_analyze_kerning_groups(bridge, body=None, **kwargs):
 	glyph_names = body.get("glyphNames")  # None = all Letter/Number glyphs
 	apply_groups = body.get("apply", True)
 	overwrite = body.get("overwrite", True)
+	mark_glyphs = bool(body.get("markGlyphs", False))
 
 	def _run():
 		from GlyphsApp import Glyphs
@@ -7306,18 +7286,18 @@ def handle_analyze_kerning_groups(bridge, body=None, **kwargs):
 					"method": method,
 				})
 
-		# Color marking (dry run or apply)
+		# Color marking is opt-in, independent of whether groups are applied.
 		for r in results:
 			g = font.glyphs[r["glyph"]]
 			if not g:
 				continue
 			if r["leftAction"] == "change" or r["rightAction"] == "change":
 				if apply_groups:
-					g.color = 4  # green = applied
+					_mark_glyph_for_audit(g, 4, mark_glyphs)  # green = applied
 				else:
-					g.color = 3  # yellow = proposed change
+					_mark_glyph_for_audit(g, 3, mark_glyphs)  # yellow = proposed change
 			elif r["leftAction"] == "skip_existing" or r["rightAction"] == "skip_existing":
-				g.color = 1  # orange = has existing, skipped
+				_mark_glyph_for_audit(g, 1, mark_glyphs)  # orange = existing, skipped
 
 		# Build group summary
 		group_summary = {"left": {}, "right": {}}
