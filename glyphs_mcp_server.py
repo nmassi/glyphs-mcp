@@ -22,7 +22,14 @@ from mcp.server.fastmcp import FastMCP
 from font_name_check import check_font_name as _check_font_name
 from glyphs_export import export_source as _export_source, format_export_log as _format_export_log
 
-mcp = FastMCP("glyphs-mcp")
+SERVER_INSTRUCTIONS = (
+    "Inspect the open font before making state-dependent claims. "
+    "Prefer dedicated GlyphsMCP tools, and use recipes for multi-step workflows. "
+    "Use execute_in_glyphs only when no dedicated tool fits. "
+    "Measure before judging quality and verify compatibility after edits."
+)
+
+mcp = FastMCP("glyphs-mcp", instructions=SERVER_INSTRUCTIONS)
 
 GLYPHS_URL = os.environ.get("GLYPHS_URL", "http://127.0.0.1:7745").rstrip("/")
 
